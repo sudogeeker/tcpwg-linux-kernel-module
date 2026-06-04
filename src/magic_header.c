@@ -8,26 +8,30 @@
 int mh_parse(struct magic_header *mh, char *desc) {
     int err;
     char* val;
+    u32 start;
+    u32 end;
 
     val = strsep(&desc, "-");
     if (!val)
         return -EINVAL;
 
-    err = kstrtouint(val, 10, &mh->start);
+    err = kstrtouint(val, 10, &start);
     if (err)
         return err;
 
     if (desc) {
-        err = kstrtouint(desc, 10, &mh->end);
+        err = kstrtouint(desc, 10, &end);
         if (err)
             return err;
     }
     else
-        mh->end = mh->start;
+        end = start;
 
-    if (mh->start > mh->end)
+    if (start > end)
         return -EINVAL;
 
+    mh->start = start;
+    mh->end = end;
     return 0;
 }
 
@@ -43,5 +47,7 @@ bool mh_validate(__le32 received, struct magic_header* mh) {
 }
 
 u32 mh_genheader(struct magic_header *mh) {
+    if (unlikely(mh->start > mh->end))
+        return mh->start;
     return get_random_u32_inclusive(mh->start, mh->end);
 }

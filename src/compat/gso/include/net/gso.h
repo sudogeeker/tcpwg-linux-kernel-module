@@ -1,5 +1,5 @@
-#ifndef _AWG_COMPAT_NET_GSO
-#define _AWG_COMPAT_NET_GSO
+#ifndef _TCP_WG_COMPAT_NET_GSO
+#define _TCP_WG_COMPAT_NET_GSO
 
 #include <linux/netdevice.h>
 

@@ -1,5 +1,5 @@
-amneziawg-linux-kmod (1.0.0) unstable; urgency=medium
+tcp-wg-linux-kmod (1.0.0) unstable; urgency=medium
 
   * Initial release
 
- -- unidentified attacker <ua@amnezia.org>  Fri, 01 Dec 2023 11:11:00 +0300
+ -- unidentified attacker <maintainers@tcp-wg.invalid>  Fri, 01 Dec 2023 11:11:00 +0300

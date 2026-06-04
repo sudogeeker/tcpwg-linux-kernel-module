@@ -1,5 +1,5 @@
-#ifndef _AWG_JUNK_H
-#define _AWG_JUNK_H
+#ifndef _TCP_WG_JUNK_H
+#define _TCP_WG_JUNK_H
 
 #include <linux/list.h>
 #include <linux/mutex.h>
@@ -37,6 +37,7 @@ struct jp_spec
 };
 
 void jp_spec_free(struct jp_spec* spec);
+int jp_spec_replace_desc(struct jp_spec* spec, char* desc);
 int jp_spec_setup(struct jp_spec* spec);
 void jp_spec_applymods(struct jp_spec* spec, struct wg_peer* peer);
 

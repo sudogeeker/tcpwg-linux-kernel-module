@@ -9,15 +9,15 @@ case "$1" in
 
     configure|reconfigure)
         # Get the version of the current loaded module:
-        old_version="$(cat /sys/module/amneziawg/version 2>/dev/null)" || exit 0
+        old_version="$(cat /sys/module/tcp_wg/version 2>/dev/null)" || exit 0
         # Get the version of the latest available module:
-        new_version="$(modinfo -F version amneziawg 2>/dev/null)" || exit 0
+        new_version="$(modinfo -F version tcp-wg 2>/dev/null)" || exit 0
         # See if the new one is actually newer:
         dpkg --compare-versions "$old_version" lt "$new_version" || exit 0
         # Trigger an update notification that recommends a reboot:
         touch /run/reboot-required || true
-        grep -Fqsx amneziawg-dkms /run/reboot-required.pkgs || \
-            echo amneziawg-dkms >> /run/reboot-required.pkgs || true
+        grep -Fqsx tcp-wg-dkms /run/reboot-required.pkgs || \
+            echo tcp-wg-dkms >> /run/reboot-required.pkgs || true
         ;;
     *)
         ;;

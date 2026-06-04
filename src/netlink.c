@@ -15,21 +15,12 @@
 #include <net/genetlink.h>
 #include <net/sock.h>
 #include <crypto/utils.h>
-#include <linux/random.h>
-#include <linux/bitops.h>
 
-#include <linux/inet.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/in.h>
 #include <linux/in6.h>
-#include <linux/inetdevice.h>
-#include <linux/byteorder/generic.h>
-
-int bogus_endpoints = 0;
-char *bogus_endpoints_prefix = "127.0.0.0/8";
-char *bogus_endpoints_prefix6 = "ff80::/16";
 
 static struct genl_family genl_family;
 
@@ -98,7 +89,7 @@ static struct wg_device *lookup_interface(struct nlattr **attrs,
 	if (!dev)
 		return ERR_PTR(-ENODEV);
 	if (!dev->rtnl_link_ops || !dev->rtnl_link_ops->kind ||
-	    strcmp(dev->rtnl_link_ops->kind, KBUILD_MODNAME)) {
+	    strcmp(dev->rtnl_link_ops->kind, TCP_WG_LINK_NAME)) {
 		dev_put(dev);
 		return ERR_PTR(-EOPNOTSUPP);
 	}
@@ -135,159 +126,16 @@ struct dump_ctx {
 
 #define DUMP_CTX(cb) ((struct dump_ctx *)(cb)->args)
 
-struct ipv4_prefix {
-	__be32 prefix;
-	int prefix_len;
-};
-
-struct ipv6_prefix {
-	u8 prefix[16];
-	int prefix_len;
-};
-
-static inline int parse_ipv4_prefix(const char *prefix_str, struct ipv4_prefix *prefix)
-{
-	char addr_str[INET_ADDRSTRLEN];
-	const char *slash;
-	int ret;
-	u8 addr[4];
-
-	if (!prefix_str || !prefix)
-		return -EINVAL;
-
-	slash = strchr(prefix_str, '/');
-	if (!slash)
-		return -EINVAL;
-
-	if (slash - prefix_str >= INET_ADDRSTRLEN)
-		return -EINVAL;
-
-	strncpy(addr_str, prefix_str, slash - prefix_str);
-	addr_str[slash - prefix_str] = '\0';
-
-	ret = kstrtoint(slash + 1, 10, &prefix->prefix_len);
-	if (ret < 0)
-		return ret;
-
-	if (prefix->prefix_len < 0 || prefix->prefix_len > 32)
-		return -EINVAL;
-
-	ret = in4_pton(addr_str, -1, addr, '\0', NULL);
-	if (ret != 1)
-		return -EINVAL;
-
-	prefix->prefix = *(__be32 *)addr;
-
-	return 0;
-}
-
-static inline int generate_ipv4_address_with_prefix(const struct ipv4_prefix *prefix, __be32 *addr)
-{
-	u32 prefix_host_order, random_suffix, full_addr_host_order;
-	u32 suffix_mask;
-
-	if (!prefix || !addr)
-		return -EINVAL;
-
-	prefix_host_order = ntohl(prefix->prefix);
-
-	if (prefix->prefix_len == 32) {
-		suffix_mask = 0;
-	} else {
-		suffix_mask = (1U << (32 - prefix->prefix_len)) - 1;
-	}
-
-	get_random_bytes(&random_suffix, sizeof(random_suffix));
-	random_suffix &= suffix_mask;
-	full_addr_host_order = (prefix_host_order & (~suffix_mask)) | random_suffix;
-	*addr = htonl(full_addr_host_order);
-
-	return 0;
-}
-
-static inline int parse_ipv6_prefix(const char *prefix_str, struct ipv6_prefix *prefix)
-{
-	char addr_str[INET6_ADDRSTRLEN];
-	const char *slash;
-	int ret;
-
-	if (!prefix_str || !prefix)
-		return -EINVAL;
-
-	slash = strchr(prefix_str, '/');
-	if (!slash)
-		return -EINVAL;
-
-	if (slash - prefix_str >= INET6_ADDRSTRLEN)
-		return -EINVAL;
-
-	strncpy(addr_str, prefix_str, slash - prefix_str);
-	addr_str[slash - prefix_str] = '\0';
-
-	ret = kstrtoint(slash + 1, 10, &prefix->prefix_len);
-	if (ret < 0)
-		return ret;
-
-	if (prefix->prefix_len < 0 || prefix->prefix_len > 128)
-		return -EINVAL;
-
-	ret = in6_pton(addr_str, -1, prefix->prefix, '\0', NULL);
-	if (ret != 1)
-		return -EINVAL;
-
-	return 0;
-}
-
-static inline int generate_ipv6_address_with_prefix(const struct ipv6_prefix *prefix, u8 *addr)
-{
-	int prefix_bytes, prefix_bits;
-	u8 mask, random_byte;
-
-	if (!prefix || !addr)
-		return -EINVAL;
-
-	memcpy(addr, prefix->prefix, 16);
-
-	prefix_bytes = prefix->prefix_len / 8;
-	prefix_bits = prefix->prefix_len % 8;
-
-	if (prefix_bytes < 16) {
-		get_random_bytes(addr + prefix_bytes, 16 - prefix_bytes);
-
-		if (prefix_bits != 0) {
-			get_random_bytes(&random_byte, sizeof(random_byte));
-			mask = (u8)(0xFF << (8 - prefix_bits));
-			addr[prefix_bytes] &= mask;
-			addr[prefix_bytes] |= random_byte & ~mask;
-		}
-	}
-
-	return 0;
-}
-
 static int
 get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 {
 
 	struct nlattr *allowedips_nest, *peer_nest = nla_nest_start(skb, 0);
 	struct allowedips_node *allowedips_node = ctx->next_allowedip;
-	struct ipv4_prefix prefix;
-	struct ipv6_prefix prefix6;
 	bool fail;
-	int ret;
 
 	if (!peer_nest)
 		return -EMSGSIZE;
-
-	if (bogus_endpoints) {
-		ret = parse_ipv4_prefix(bogus_endpoints_prefix, &prefix);
-		if (ret < 0)
-			return ret;
-
-		ret = parse_ipv6_prefix(bogus_endpoints_prefix6, &prefix6);
-		if (ret < 0)
-			return ret;
-	}
 
 	fail = nla_put_u32(skb, WGPEER_A_FLAGS, WGPEER_F_HAS_ADVANCED_SECURITY);
 	if (fail)
@@ -336,21 +184,9 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 		if (peer->endpoint.addr.sa_family == AF_INET) {
 			struct sockaddr_in addr4 = peer->endpoint.addr4;
 
-			if (bogus_endpoints) {
-				ret = generate_ipv4_address_with_prefix(&prefix, &addr4.sin_addr.s_addr);
-				if (ret < 0)
-					goto err;
-			}
-
 			fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
 		} else if (peer->endpoint.addr.sa_family == AF_INET6) {
 			struct sockaddr_in6 addr6 = peer->endpoint.addr6;
-
-			if (bogus_endpoints) {
-				ret = generate_ipv6_address_with_prefix(&prefix6, addr6.sin6_addr.s6_addr);
-				if (ret < 0)
-					goto err;
-			}
 
 			fail = nla_put(skb, WGPEER_A_ENDPOINT, sizeof(addr6), &addr6);
 		}
@@ -536,6 +372,31 @@ static int wg_get_device_done(struct netlink_callback *cb)
 		dev_put(ctx->wg->dev);
 	wg_peer_put(ctx->next_peer);
 	return 0;
+}
+
+static int parse_header_attr(struct magic_header *header, struct nlattr *attr)
+{
+	char *str;
+	int ret;
+
+	str = nla_strdup(attr, GFP_KERNEL);
+	if (!str)
+		return -ENOMEM;
+
+	ret = mh_parse(header, str);
+	kfree(str);
+	return ret;
+}
+
+static int set_ispec(struct jp_spec *spec, struct nlattr *attr)
+{
+	char *desc;
+
+	desc = nla_strdup(attr, GFP_KERNEL);
+	if (!desc)
+		return -ENOMEM;
+
+	return jp_spec_replace_desc(spec, desc);
 }
 
 static int set_port(struct wg_device *wg, u16 port)
@@ -734,9 +595,12 @@ out:
 static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 {
 	struct wg_device *wg = lookup_interface(info->attrs, skb);
+	struct magic_header headers[ARRAY_SIZE(wg->headers)];
+	u16 junk_size[ARRAY_SIZE(wg->junk_size)];
+	bool advanced_security_update = false;
+	u16 jc, jmin, jmax;
 	u32 flags = 0;
 	int ret;
-	char *str;
 
 	if (IS_ERR(wg)) {
 		ret = PTR_ERR(wg);
@@ -745,6 +609,11 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 
 	rtnl_lock();
 	mutex_lock(&wg->device_update_lock);
+	memcpy(headers, wg->headers, sizeof(headers));
+	memcpy(junk_size, wg->junk_size, sizeof(junk_size));
+	jc = wg->jc;
+	jmin = wg->jmin;
+	jmax = wg->jmax;
 
 	if (info->attrs[WGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[WGDEVICE_A_FLAGS]);
@@ -777,104 +646,118 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 	}
 
 	if (info->attrs[WGDEVICE_A_JC]) {
-		wg->advanced_security = true;
-		wg->jc = nla_get_u16(info->attrs[WGDEVICE_A_JC]);
+		advanced_security_update = true;
+		jc = nla_get_u16(info->attrs[WGDEVICE_A_JC]);
 	}
 
 	if (info->attrs[WGDEVICE_A_JMIN]) {
-		wg->advanced_security = true;
-		wg->jmin = nla_get_u16(info->attrs[WGDEVICE_A_JMIN]);
+		advanced_security_update = true;
+		jmin = nla_get_u16(info->attrs[WGDEVICE_A_JMIN]);
 	}
 
 	if (info->attrs[WGDEVICE_A_JMAX]) {
-		wg->advanced_security = true;
-		wg->jmax = nla_get_u16(info->attrs[WGDEVICE_A_JMAX]);
+		advanced_security_update = true;
+		jmax = nla_get_u16(info->attrs[WGDEVICE_A_JMAX]);
 	}
 
 	if (info->attrs[WGDEVICE_A_S1]) {
-		wg->advanced_security = true;
-		wg->junk_size[MSGIDX_HANDSHAKE_INIT] = nla_get_u16(info->attrs[WGDEVICE_A_S1]);
+		advanced_security_update = true;
+		junk_size[MSGIDX_HANDSHAKE_INIT] = nla_get_u16(info->attrs[WGDEVICE_A_S1]);
 	}
 
 	if (info->attrs[WGDEVICE_A_S2]) {
-		wg->advanced_security = true;
-		wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE] = nla_get_u16(info->attrs[WGDEVICE_A_S2]);
+		advanced_security_update = true;
+		junk_size[MSGIDX_HANDSHAKE_RESPONSE] = nla_get_u16(info->attrs[WGDEVICE_A_S2]);
 	}
 
 	if (info->attrs[WGDEVICE_A_H1]) {
-		wg->advanced_security = true;
-		str = nla_strdup(info->attrs[WGDEVICE_A_H1], GFP_KERNEL);
-		ret = mh_parse(&wg->headers[MSGIDX_HANDSHAKE_INIT], str);
-		kfree(str);
+		advanced_security_update = true;
+		ret = parse_header_attr(&headers[MSGIDX_HANDSHAKE_INIT],
+					info->attrs[WGDEVICE_A_H1]);
 		if (ret)
 			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_H2]) {
-		wg->advanced_security = true;
-		str = nla_strdup(info->attrs[WGDEVICE_A_H2], GFP_KERNEL);
-		ret = mh_parse(&wg->headers[MSGIDX_HANDSHAKE_RESPONSE], str);
-		kfree(str);
+		advanced_security_update = true;
+		ret = parse_header_attr(&headers[MSGIDX_HANDSHAKE_RESPONSE],
+					info->attrs[WGDEVICE_A_H2]);
 		if (ret)
 			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_H3]) {
-		wg->advanced_security = true;
-		str = nla_strdup(info->attrs[WGDEVICE_A_H3], GFP_KERNEL);
-		ret = mh_parse(&wg->headers[MSGIDX_HANDSHAKE_COOKIE], str);
-		kfree(str);
+		advanced_security_update = true;
+		ret = parse_header_attr(&headers[MSGIDX_HANDSHAKE_COOKIE],
+					info->attrs[WGDEVICE_A_H3]);
 		if (ret)
 			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_H4]) {
-		wg->advanced_security = true;
-		str = nla_strdup(info->attrs[WGDEVICE_A_H4], GFP_KERNEL);
-		ret = mh_parse(&wg->headers[MSGIDX_TRANSPORT], str);
-		kfree(str);
+		advanced_security_update = true;
+		ret = parse_header_attr(&headers[MSGIDX_TRANSPORT],
+					info->attrs[WGDEVICE_A_H4]);
 		if (ret)
 			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_S3]) {
-		wg->advanced_security = true;
-		wg->junk_size[MSGIDX_HANDSHAKE_COOKIE] = nla_get_u16(info->attrs[WGDEVICE_A_S3]);
+		advanced_security_update = true;
+		junk_size[MSGIDX_HANDSHAKE_COOKIE] = nla_get_u16(info->attrs[WGDEVICE_A_S3]);
 	}
 
 	if (info->attrs[WGDEVICE_A_S4]) {
+		advanced_security_update = true;
+		junk_size[MSGIDX_TRANSPORT] = nla_get_u16(info->attrs[WGDEVICE_A_S4]);
+	}
+
+	if (advanced_security_update) {
+		ret = wg_device_validate_advanced_security_config(
+			wg, jc, &jmin, &jmax, junk_size, headers);
+		if (ret)
+			goto out;
 		wg->advanced_security = true;
-		wg->junk_size[MSGIDX_TRANSPORT] = nla_get_u16(info->attrs[WGDEVICE_A_S4]);
+		wg->jc = jc;
+		wg->jmin = jmin;
+		wg->jmax = jmax;
+		memcpy(wg->junk_size, junk_size, sizeof(wg->junk_size));
+		memcpy(wg->headers, headers, sizeof(wg->headers));
 	}
 
 	if (info->attrs[WGDEVICE_A_I1]) {
 		wg->advanced_security = true;
-		kfree(wg->ispecs[0].desc);
-		wg->ispecs[0].desc = nla_strdup(info->attrs[WGDEVICE_A_I1], GFP_KERNEL);
+		ret = set_ispec(&wg->ispecs[0], info->attrs[WGDEVICE_A_I1]);
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_I2]) {
 		wg->advanced_security = true;
-		kfree(wg->ispecs[1].desc);
-		wg->ispecs[1].desc = nla_strdup(info->attrs[WGDEVICE_A_I2], GFP_KERNEL);
+		ret = set_ispec(&wg->ispecs[1], info->attrs[WGDEVICE_A_I2]);
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_I3]) {
 		wg->advanced_security = true;
-		kfree(wg->ispecs[2].desc);
-		wg->ispecs[2].desc = nla_strdup(info->attrs[WGDEVICE_A_I3], GFP_KERNEL);
+		ret = set_ispec(&wg->ispecs[2], info->attrs[WGDEVICE_A_I3]);
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_I4]) {
 		wg->advanced_security = true;
-		kfree(wg->ispecs[3].desc);
-		wg->ispecs[3].desc = nla_strdup(info->attrs[WGDEVICE_A_I4], GFP_KERNEL);
+		ret = set_ispec(&wg->ispecs[3], info->attrs[WGDEVICE_A_I4]);
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[WGDEVICE_A_I5]) {
 		wg->advanced_security = true;
-		kfree(wg->ispecs[4].desc);
-		wg->ispecs[4].desc = nla_strdup(info->attrs[WGDEVICE_A_I5], GFP_KERNEL);
+		ret = set_ispec(&wg->ispecs[4], info->attrs[WGDEVICE_A_I5]);
+		if (ret)
+			goto out;
 	}
 
 	if (flags & WGDEVICE_F_REPLACE_PEERS)

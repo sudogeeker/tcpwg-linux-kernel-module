@@ -284,9 +284,9 @@ $(KERNEL_PATH)/.installed: $(KERNEL_TAR)
 	printf 'ifdef CONFIG_X86_64\nLDFLAGS += $$(call ld-option, -z max-page-size=0x200000)\nendif\n' >> $(KERNEL_PATH)/arch/x86/Makefile
 	sed -i 's/^Elf_Addr per_cpu_load_addr;$$/static \0/' $(KERNEL_PATH)/arch/x86/tools/relocs.c || true
 	if grep -sqr UTS_UBUNTU_RELEASE_ABI $(KERNEL_PATH)/debian/rules.d; then echo 'KBUILD_CFLAGS += -DUTS_UBUNTU_RELEASE_ABI=0' >> $(KERNEL_PATH)/Makefile; fi
-	sed -i "/^if INET\$$/a source \"net/wireguard/Kconfig\"" $(KERNEL_PATH)/net/Kconfig
-	sed -i "/^obj-\$$(CONFIG_NETFILTER).*+=/a obj-\$$(CONFIG_WIREGUARD) += wireguard/" $(KERNEL_PATH)/net/Makefile
-	ln -sfT $(shell readlink -f ../..) $(KERNEL_PATH)/net/wireguard
+	sed -i "/^if INET\$$/a source \"net/tcp-wg/Kconfig\"" $(KERNEL_PATH)/net/Kconfig
+	sed -i "/^obj-\$$(CONFIG_NETFILTER).*+=/a obj-\$$(CONFIG_TCP_WG) += tcp-wg/" $(KERNEL_PATH)/net/Makefile
+	ln -sfT $(shell readlink -f ../..) $(KERNEL_PATH)/net/tcp-wg
 	touch $@
 else
 $(KERNEL_PATH)/.installed:

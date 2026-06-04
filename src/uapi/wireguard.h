@@ -116,7 +116,7 @@
  *                                       this is unset. Otherwise, must be set
  *                                       to 1.
  *            WGPEER_A_ADVANCED_SECURITY: flag indicating that advanced security
- *                                       techniques provided by AmneziaWG should
+ *                                       techniques provided by tcp-wg should
  *                                       be used.
  *        0: NLA_NESTED
  *            ...
@@ -149,7 +149,7 @@
  *        WGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
  *        WGPEER_A_ENDPOINT: NLA_MIN_LEN(struct sockaddr), struct sockaddr_in or struct sockaddr_in6
  *        WGPEER_A_ADVANCED_SECURITY: flag indicating that advanced security
- *                                    techniques provided by AmneziaWG should
+ *                                    techniques provided by tcp-wg should
  *                                    be used.
  *
  */
@@ -157,7 +157,7 @@
 #ifndef _WG_UAPI_WIREGUARD_H
 #define _WG_UAPI_WIREGUARD_H
 
-#define WG_GENL_NAME "amneziawg"
+#define WG_GENL_NAME "tcp-wg"
 #define WG_GENL_VERSION 2
 
 #define WG_KEY_LEN 32

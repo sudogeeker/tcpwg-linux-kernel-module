@@ -130,12 +130,12 @@ static void kmod_selftests(void)
 	if (fcntl(fileno(file), F_SETFL, O_NONBLOCK) < 0)
 		panic("fcntl(kmsg, nonblock)");
 	while (fgets(line, sizeof(line), file)) {
-		start = strstr(line, "wireguard: ");
+		start = strstr(line, "tcp-wg: ");
 		if (!start)
 			continue;
 		start += 11;
 		*strchrnul(start, '\n') = '\0';
-		if (strstr(start, "www.wireguard.com"))
+		if (strstr(start, "loaded."))
 			break;
 		pass = strstr(start, ": pass");
 		if (!pass || pass[6] != '\0') {

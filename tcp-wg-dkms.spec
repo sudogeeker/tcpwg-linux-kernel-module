@@ -1,6 +1,6 @@
 %global debug_package %{nil}
 
-Name:           amneziawg-dkms
+Name:           tcp-wg-dkms
 Version:        1.0.20241112
 Release:        1%{?dist}
 Epoch:          1
@@ -10,14 +10,14 @@ License:        GPLv2
 Group:          System Environment/Kernel
 BuildArch:      noarch
 
-Source0:        https://github.com/amnezia-vpn/amneziawg-linux-kernel-module/archive/refs/tags/v%{version}.tar.gz
+Source0:        https://github.com/tcp-wg/tcp-wg-linux-kernel-module/archive/refs/tags/v%{version}.tar.gz
 
 BuildRequires:  kernel-devel
 BuildRequires:  sed
 BuildRequires:  make
 BuildRequires:  bc
 
-Provides:       kmod(amneziawg.ko) = %{epoch}:%{version}-%{release}
+Provides:       kmod(tcp-wg.ko) = %{epoch}:%{version}-%{release}
 Requires:       dkms
 Requires:       kernel-devel
 Requires:       make
@@ -37,32 +37,32 @@ running on embedded interfaces and super computers alike, fit for
 many different circumstances. It runs over UDP.
 
 %prep
-%autosetup -p1 -n amneziawg-linux-kernel-module-%{version}
+%autosetup -p1 -n tcp-wg-linux-kernel-module-%{version}
 
 # Fix the Makefile for CentOS7 since it ships coreutils from 2013.
-sed -i 's/install .* -D -t\(.\+\) /mkdir -p \1 \&\& \0/' %{_builddir}/amneziawg-linux-kernel-module-%{version}/src/Makefile
+sed -i 's/install .* -D -t\(.\+\) /mkdir -p \1 \&\& \0/' %{_builddir}/tcp-wg-linux-kernel-module-%{version}/src/Makefile
 
 # Set version in dkms.conf and Makefile
-sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"%{version}\"/" %{_builddir}/amneziawg-linux-kernel-module-%{version}/src/dkms.conf
-sed -i "s/^WIREGUARD_VERSION = .*/WIREGUARD_VERSION = %{version}/" %{_builddir}/amneziawg-linux-kernel-module-%{version}/src/Makefile
+sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"%{version}\"/" %{_builddir}/tcp-wg-linux-kernel-module-%{version}/src/dkms.conf
+sed -i "s/^WIREGUARD_VERSION = .*/WIREGUARD_VERSION = %{version}/" %{_builddir}/tcp-wg-linux-kernel-module-%{version}/src/Makefile
 
 %build
 
 %install
-mkdir -p %{buildroot}%{_usrsrc}/amneziawg-%{version}/
-make DESTDIR=%{buildroot} DKMSDIR=%{_usrsrc}/amneziawg-%{version}/ \
-    -C %{_builddir}/amneziawg-linux-kernel-module-%{version}/src dkms-install
+mkdir -p %{buildroot}%{_usrsrc}/tcp-wg-%{version}/
+make DESTDIR=%{buildroot} DKMSDIR=%{_usrsrc}/tcp-wg-%{version}/ \
+    -C %{_builddir}/tcp-wg-linux-kernel-module-%{version}/src dkms-install
 
 %post
-dkms add -m amneziawg -v %{version} -q --rpm_safe_upgrade || :
-dkms build -m amneziawg -v %{version} -q || :
-dkms install -m amneziawg -v %{version} -q --force || :
-echo "amneziawg-dkms-%{version}-%{release}" > /var/lib/dkms/amneziawg/%{version}/version
+dkms add -m tcp-wg -v %{version} -q --rpm_safe_upgrade || :
+dkms build -m tcp-wg -v %{version} -q || :
+dkms install -m tcp-wg -v %{version} -q --force || :
+echo "tcp-wg-dkms-%{version}-%{release}" > /var/lib/dkms/tcp-wg/%{version}/version
 
 %preun
 # Check if we are running an upgrade
 if [ $1 -ne 0 ]; then
-  WG_VERSION=$(dkms status amneziawg|grep installed|sort -r -V|awk '{print $2}'|cut -f1 -d,)
+  WG_VERSION=$(dkms status tcp-wg|grep installed|sort -r -V|awk '{print $2}'|cut -f1 -d,)
   if [ "$WG_VERSION" != "%{version}" ] ; then
 
     true
@@ -75,27 +75,27 @@ if [ $1 -ne 0 ]; then
 fi
 
 # If we are not running an upgrade then remove everything!
-WG_VERSION_FILE=$(cat /var/lib/dkms/amneziawg/%{version}/version)
-WG_RPM_VERSION=amneziawg-dkms-%{version}-%{release}
+WG_VERSION_FILE=$(cat /var/lib/dkms/tcp-wg/%{version}/version)
+WG_RPM_VERSION=tcp-wg-dkms-%{version}-%{release}
 if [ "$WG_RPM_VERSION" = "$WG_VERSION_FILE" ]; then
 
-    dkms remove -m amneziawg -v %{version} -q --all --rpm_safe_upgrade || :
+    dkms remove -m tcp-wg -v %{version} -q --all --rpm_safe_upgrade || :
 
 fi
 
 exit 0
 
 %files
-%{_usrsrc}/amneziawg-%{version}
+%{_usrsrc}/tcp-wg-%{version}
 
 %changelog
-* Thu Oct 23 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20241023-1
+* Thu Oct 23 2024 tcp-wg maintainers <maintainers@tcp-wg.invalid> - 1.0.20241023-1
 - Update to 1.0.20241023
 
-* Thu Oct 22 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20241022-1
+* Thu Oct 22 2024 tcp-wg maintainers <maintainers@tcp-wg.invalid> - 1.0.20241022-1
 - Update to 1.0.20241022
 
-* Thu Feb 1 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20240201-1
+* Thu Feb 1 2024 tcp-wg maintainers <maintainers@tcp-wg.invalid> - 1.0.20240201-1
 - Update to 1.0.20240201
 
 * Tue Jun 28 2022 Joe Doss <joe@solidadmin.com> - 1.0.20220627-1
@@ -162,10 +162,10 @@ exit 0
 - WireGuard 1.0.0 has been released for Linux 5.6 :)
 
 * Thu Mar 19 2020 Joe Doss <joe@solidadmin.com> - 0.0.20200318-1
-- Remove patch: amneziawg-linux-compat-RHEL-0.0.20200215.patch
+- Remove patch: tcp-wg-linux-compat-RHEL-0.0.20200215.patch
 
 * Sat Feb 15 2020 Joe Doss <joe@solidadmin.com> - 0.0.20200215-2
-- Apply patch: https://git.zx2c4.com/amneziawg-linux-compat/patch/?id=27ce49e385a87cb784368a0995f8284fd6887d8c
+- Apply patch: https://git.zx2c4.com/tcp-wg-linux-compat/patch/?id=27ce49e385a87cb784368a0995f8284fd6887d8c
 
 * Fri Feb 14 2020 Joe Doss <joe@solidadmin.com> - 0.0.20200215-1
 - Update to 0.0.20200215
@@ -184,9 +184,9 @@ exit 0
 - RPM spec updates
 
 * Thu Dec 26 2019 Joe Doss <joe@solidadmin.com> - 0.0.20191226-1
-- Split amneziawg-tools back out into it's own spec
-- Switch to https://git.zx2c4.com/amneziawg-linux-compat repo
-- Move back to amneziawg-dkms spec
+- Split tcp-wg-tools back out into it's own spec
+- Switch to https://git.zx2c4.com/tcp-wg-linux-compat repo
+- Move back to tcp-wg-dkms spec
 
 * Thu Dec 19 2019 Joe Doss <joe@solidadmin.com> - 0.0.20191219-1
 - Update to 0.0.20191219
@@ -199,8 +199,8 @@ exit 0
 
 * Wed Nov 27 2019 Joe Doss <joe@solidadmin.com> - 0.0.20191127-1
 - Update to 0.0.20191127
-- Add /var/lib/dkms/amneziawg/%{version}/version
-- Merge amneziawg-tools.spec and amneziawg-dkms.spec
+- Add /var/lib/dkms/tcp-wg/%{version}/version
+- Merge tcp-wg-tools.spec and tcp-wg-dkms.spec
 - Move %posttrans back to $post as it didn't fix the Error! Could not locate dkms.conf file issues.
 - Add in logic for better uninstalls and upgrades
 

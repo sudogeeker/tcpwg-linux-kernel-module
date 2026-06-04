@@ -1,2 +1,2 @@
-amneziawg-dkms_1.0.0_all.deb kernel optional
-amneziawg-linux-kmod_1.0.0_amd64.buildinfo net optional
+tcp-wg-dkms_1.0.0_all.deb kernel optional
+tcp-wg-linux-kmod_1.0.0_amd64.buildinfo net optional

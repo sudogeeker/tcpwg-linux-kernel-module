@@ -7,13 +7,15 @@
 #define _WG_SOCKET_H
 
 #include <linux/netdevice.h>
-#include <linux/udp.h>
+#include <linux/types.h>
 #include <linux/if_vlan.h>
 #include <linux/if_ether.h>
 
 int wg_socket_init(struct wg_device *wg, u16 port);
 void wg_socket_reinit(struct wg_device *wg, struct sock *new4,
 		      struct sock *new6);
+int wg_socket_tcp_init(void);
+void wg_socket_tcp_uninit(void);
 int wg_socket_send_buffer_to_peer(struct wg_peer *peer, void *data,
 				  size_t len, u8 ds, size_t junk_size);
 int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,

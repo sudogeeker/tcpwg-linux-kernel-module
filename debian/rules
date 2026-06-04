@@ -7,13 +7,13 @@ include /usr/share/dpkg/default.mk
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export DEB_VERSION_UPSTREAM
 
-AMNEZIAWG_ARGS = V=1
+TCP_WG_ARGS = V=1
 
 %:
 	dh $@ --with dkms
 
 override_dh_auto_install:
-	$(MAKE) -C src DESTDIR=`pwd`/debian/amneziawg-dkms DKMSDIR=/usr/src/amneziawg-$(DEB_VERSION_UPSTREAM) dkms-install
+	$(MAKE) -C src DESTDIR=`pwd`/debian/tcp-wg-dkms DKMS_VERSION=$(DEB_VERSION_UPSTREAM) dkms-source-install
 
 override_dh_dkms:
-	dh_dkms -p amneziawg-dkms -- src/dkms.conf
+	dh_dkms -p tcp-wg-dkms -- src/dkms.conf

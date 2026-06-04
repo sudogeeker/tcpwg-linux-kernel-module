@@ -20,6 +20,8 @@
 #include <linux/net.h>
 #include <linux/ptr_ring.h>
 
+#define TCP_WG_LINK_NAME "tcp-wg"
+
 struct wg_device;
 
 struct multicore_worker {
@@ -52,6 +54,7 @@ struct wg_device {
 	struct allowedips peer_allowedips;
 	struct mutex device_update_lock, socket_update_lock;
 	struct list_head device_list, peer_list;
+	struct list_head tcpwg_list;
 	atomic_t handshake_queue_len;
 	unsigned int num_peers, device_update_gen;
 	u32 fwmark;
@@ -68,6 +71,9 @@ struct wg_device {
 
 int wg_device_init(void);
 void wg_device_uninit(void);
+int wg_device_validate_advanced_security_config(
+	struct wg_device *wg, u16 jc, u16 *jmin, u16 *jmax,
+	const u16 junk_size[4], const struct magic_header headers[4]);
 int wg_device_handle_post_config(struct wg_device *wg);
 
 #endif /* _WG_DEVICE_H */

@@ -14,6 +14,8 @@
 #include <crypto/chacha20poly1305.h>
 #include <crypto/utils.h>
 
+#include <linux/tcp.h>
+
 #include <net/ipv6.h>
 
 void wg_cookie_checker_init(struct cookie_checker *checker,
@@ -110,7 +112,7 @@ static void make_cookie(u8 cookie[COOKIE_LEN], struct sk_buff *skb,
 	else if (skb->protocol == htons(ETH_P_IPV6))
 		blake2s_update(&state, (u8 *)&ipv6_hdr(skb)->saddr,
 			       sizeof(struct in6_addr));
-	blake2s_update(&state, (u8 *)&udp_hdr(skb)->source, sizeof(__be16));
+	blake2s_update(&state, (u8 *)&tcp_hdr(skb)->source, sizeof(__be16));
 	blake2s_final(&state, cookie);
 
 	up_read(&checker->secret_lock);

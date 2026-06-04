@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/skbuff.h>
+#include <linux/tcp.h>
 
 enum noise_lengths {
 	NOISE_PUBLIC_KEY_LEN = CURVE25519_KEY_SIZE,
@@ -136,7 +137,7 @@ enum message_size {
 
 #define SKB_HEADER_LEN                                       \
 	(max(sizeof(struct iphdr), sizeof(struct ipv6hdr)) + \
-	 sizeof(struct udphdr) + NET_SKB_PAD)
+	 sizeof(struct tcphdr) + NET_SKB_PAD)
 #define DATA_PACKET_HEAD_ROOM \
 	ALIGN(sizeof(struct message_data) + SKB_HEADER_LEN, 4)
 

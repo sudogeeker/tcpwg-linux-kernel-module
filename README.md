@@ -1,166 +1,362 @@
-# AmneziaWG kernel module
+# tcp-wg kernel module
+
+Out-of-tree Linux kernel module for the `tcp-wg` network link type.
+
+This README documents one supported installation flow:
+
+1. clone this repository,
+2. build the kernel module,
+3. install it with the Makefile.
 
 ## Table of contents
 
 - [Installation](#installation)
-  - [Ubuntu](#ubuntu)
-  - [Debian](#debian)
-  - [Linux Mint](#linux-mint)
-  - [RHEL/CentOS/SUSE/Fedora Core](#rhelcentossusefedora-core)
-- [Manual build](#manual-build)
+  - [Requirements](#requirements)
+  - [Build and install](#build-and-install)
+  - [Verify the installation](#verify-the-installation)
+  - [Upgrade or reinstall](#upgrade-or-reinstall)
+  - [Uninstall](#uninstall)
+- [Makefile reference](#makefile-reference)
+  - [Targets](#targets)
+  - [Variables](#variables)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
 ## Installation
 
-### Ubuntu
+### Requirements
 
-Open `Terminal` and proceed with following instructions:
+Install the build toolchain, the headers for the kernel you are building
+against, and DKMS. The default `make install` target uses DKMS.
 
-1. (Optionally) Upgrade your system to latest packages including latest available kernel by running `apt-get full-upgrade`.
-After kernel upgrade reboot is required.
-2. Ensure that you have source repositories configured for APT - run `vi /etc/apt/sources.list` and make sure that there is
-at least one line starting with `deb-src` is present and uncommented.
-3. Install pre-requisites - run `sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)`.
-4. Run `sudo add-apt-repository ppa:amnezia/ppa`.
-5. Finally execute `sudo apt-get install -y amneziawg`.
-
-### Debian
-
-Open `Terminal` and do next steps:
-
-1. (Optionally) Upgrade your system to latest packages including latest available kernel by running `apt-get full-upgrade`.
-   After kernel upgrade reboot is required.
-2. Ensure that you have source repositories configured for APT - run `vi /etc/apt/sources.list` and make sure that there is
-   at least one line starting with `deb-src` is present and uncommented.
-3. Execute following commands:
-```shell
-sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)
-sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828
-echo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
-echo "deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
-sudo apt-get update
-sudo apt-get install -y amneziawg
-```
-
-### Linux Mint
-
-Open `Software Sources` and make sure that `Source code repositories` (under `Optional Sources`) are enabled.
-
-Proceed to `PPAs` section and add `ppa:amnezia/ppa` PPA repository, after that save configuration and rebuild `apt` cache.
-
-After that, open `Terminal` and run:
+Debian or Ubuntu:
 
 ```shell
-sudo apt-get install -y amneziawg
+sudo apt update
+sudo apt install -y git build-essential dkms linux-headers-amd64
 ```
 
-### RHEL/CentOS/SUSE/Fedora Core
-
-*If you use release that doesn't have DKMS support out of the box, you may need to install [EPEL](https://docs.fedoraproject.org/en-US/epel/#_quickstart) first.*
-
-Open `Terminal` and run:
+On Debian or Ubuntu cloud kernels, prefer the cloud header meta package:
 
 ```shell
-sudo dnf copr enable amneziavpn/amneziawg
-sudo dnf install amneziawg-dkms amneziawg-tools
+sudo apt install -y git build-essential dkms linux-headers-cloud-amd64
 ```
 
-Before installation it is strictly recommended to upgrade your system kernel to the latest available version and perform
-the reboot afterwards.
+Prefer `linux-headers-amd64` or `linux-headers-cloud-amd64` when they match
+your kernel flavour. These meta packages track kernel upgrades and keep matching
+headers installed for future DKMS rebuilds. Use `linux-headers-$(uname -r)` only
+when you need the exact headers for the currently running kernel and the
+appropriate meta package is not available for that system.
 
-## Manual build
+RHEL, CentOS Stream, Fedora, or compatible distributions:
 
-You may need to install kernel headers and/or build essentials packages before running following steps.
+```shell
+sudo dnf install -y git make gcc dkms kernel-devel-$(uname -r)
+```
 
-1. In Terminal:
-    ```shell
-    git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
-    cd amneziawg-linux-kernel-module/src
-    ```
+Arch Linux:
 
-2. Now, if you run modern Linux with kernel version 5.6+, you need to download your kernel's source from anywhere possible
-and link resulting tree to `kernel` symlink:
-    
-    ```shell
-    ln -s /path/to/kernel/source kernel
-    ```
-    
-    Please note to find and provide full kernel sourcetree, not only headers. **If you run on legacy kernel (<5.6), you do not need to perform this step.**
+```shell
+sudo pacman -S --needed git base-devel dkms linux-headers
+```
 
-3. Now perform build and installation:
-    ```shell
-    make
-    sudo make install
-    ```
-   
-    Or on a capable system you may want to use DKMS for this:
-    ```shell
-    sudo make dkms-install
-    sudo dkms add -m amneziawg -v 1.0.0
-    sudo dkms build -m amneziawg -v 1.0.0
-    sudo dkms install -m amneziawg -v 1.0.0
-    ```
+The kernel build directory must exist. By default the Makefile uses:
+
+```shell
+/lib/modules/$(uname -r)/build
+```
+
+Check it before building:
+
+```shell
+test -d /lib/modules/$(uname -r)/build
+```
+
+If this command fails, install the matching kernel headers or kernel-devel
+package for the kernel reported by `uname -r`.
+
+### Build and install
+
+Clone the repository, enter the module source directory, build it, and install
+it:
+
+```shell
+git clone https://github.com/sudogeeker/tcpwg-linux-kernel-module.git
+cd tcpwg-linux-kernel-module/src
+make -j"$(nproc)"
+sudo make install
+```
+
+`make` builds `tcp-wg.ko` for the currently running kernel.
+
+`sudo make install` is the canonical install command. In this Makefile,
+`install` is an alias for `dkms-install`. It copies the source into
+`/usr/src/tcp-wg-1.0.0`, registers the module with DKMS if needed, rebuilds it
+for the selected kernel, installs it, and runs `depmod`.
+
+The DKMS install path is used because it can rebuild the module when the kernel
+changes.
+
+### Verify the installation
+
+Load the module:
+
+```shell
+sudo modprobe tcp-wg
+```
+
+Check that the installed module is visible to the kernel:
+
+```shell
+modinfo tcp-wg
+```
+
+Check that the link type is registered:
+
+```shell
+sudo ip link add dev wg-test type tcp-wg
+sudo ip link delete dev wg-test
+```
+
+If `ip link add` fails with an unknown device type, the module is not loaded or
+was not installed for the running kernel.
+
+### Upgrade or reinstall
+
+Pull the latest source and run the same build/install flow again:
+
+```shell
+cd tcpwg-linux-kernel-module
+git pull --ff-only
+cd src
+make clean
+make -j"$(nproc)"
+sudo make install
+```
+
+The `dkms-install` target removes an already built or installed DKMS entry for
+the selected kernel before rebuilding it, so reinstalling the same version is
+supported.
+
+After reinstalling, reload the module if it is already loaded:
+
+```shell
+sudo modprobe -r tcp-wg
+sudo modprobe tcp-wg
+```
+
+If an interface is using the module, delete or stop that interface before
+running `modprobe -r`.
+
+### Uninstall
+
+There is no Makefile uninstall target. For a DKMS install, remove the DKMS
+module version directly:
+
+```shell
+sudo dkms remove -m tcp-wg -v 1.0.0 --all
+```
+
+Then remove any remaining installed module file for kernels where it exists and
+refresh module dependencies:
+
+```shell
+sudo find /lib/modules -name 'tcp-wg.ko*' -delete
+sudo depmod -a
+```
+
+## Makefile reference
+
+All commands in this section are run from the `src` directory:
+
+```shell
+cd tcpwg-linux-kernel-module/src
+```
+
+### Targets
+
+- `make`, `make all`, or `make module`
+  Builds `tcp-wg.ko` through the kernel build system:
+
+  ```shell
+  make -C $(KERNELDIR) M=$(PWD) WIREGUARD_VERSION="$(WIREGUARD_VERSION)" OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)" modules
+  ```
+
+- `make debug`
+  Builds the module with verbose kernel build output and `CONFIG_TCP_WG_DEBUG=y`.
+  This enables the debug-specific flags from `Kbuild`.
+
+- `make clean`
+  Runs the kernel build system clean target for this external module.
+
+- `sudo make module-install`
+  Runs `modules_install` for the selected kernel and then `depmod`. This is a
+  direct current-kernel install target from the Makefile; it does not use DKMS
+  and does not automatically rebuild after a kernel upgrade. It is documented
+  here as a Makefile target, not as the supported installation flow.
+
+- `sudo make install`
+  Alias for `dkms-install`. This is the supported installation target.
+
+- `sudo make dkms-install`
+  Runs `dkms-source-install`, verifies that the `dkms` command exists, adds the
+  module to DKMS when needed, removes any already built or installed entry for
+  the selected kernel, rebuilds, installs with `--force`, and runs `depmod`.
+
+- `sudo make dkms-source-install`
+  Copies the source files used by DKMS into `$(DESTDIR)$(DKMSDIR)` and rewrites
+  `PACKAGE_VERSION` in the copied `dkms.conf`. Tests and generated
+  `*.mod.c` files are intentionally excluded. This target is useful for
+  packaging. It does not build or install the module by itself.
+
+- `make style`
+  Runs the kernel `checkpatch.pl` script against the module sources.
+
+- `make check`
+  Runs `scan-build` with extra sparse/endian checking flags. This requires
+  `scan-build` to be installed.
+
+- `make coccicheck`
+  Runs the kernel `coccicheck` target in report mode.
+
+- `make cloc`
+  Counts source lines with `cloc`, filtering compat definitions through the
+  helper script under `kernel-tree-scripts/`.
+
+### Variables
+
+The Makefile supports the following variables. Pass them on the command line
+when needed, for example `make KERNELRELEASE=6.12.0-custom`.
+
+- `WIREGUARD_VERSION`
+  Version string compiled into the module. Default: `1.0.0`.
+
+- `OMIT_ENDPOINTS`
+  When set, passes `OMIT_ENDPOINTS` into Kbuild. Default: empty.
+
+- `KERNELRELEASE`
+  Kernel release to build or install for. Default: `$(uname -r)`.
+
+- `KERNELDIR`
+  Kernel build directory used by `module`, `module-debug`, `clean`, and
+  `module-install`. Default: `/lib/modules/$(KERNELRELEASE)/build`.
+
+- `PREFIX`
+  Base prefix for source installation paths. Default: `/usr`.
+
+- `DESTDIR`
+  Packaging destination root. Used by `dkms-source-install`. `dkms-install`
+  refuses to run when `DESTDIR` is set.
+
+- `SRCDIR`
+  Source directory under `PREFIX`. Default: `$(PREFIX)/src`.
+
+- `DKMS`
+  DKMS executable name or path. Default: `dkms`.
+
+- `DKMS_NAME`
+  DKMS module name. Default: `tcp-wg`.
+
+- `DKMS_VERSION`
+  DKMS module version. Default: `$(WIREGUARD_VERSION)`.
+
+- `DKMSDIR`
+  Destination used by `dkms-source-install`. Default:
+  `$(SRCDIR)/$(DKMS_NAME)-$(DKMS_VERSION)`, which expands to
+  `/usr/src/tcp-wg-1.0.0` with default values.
+
+- `DEPMOD`
+  `depmod` executable name or path. Default: `depmod`.
+
+- `DEPMODBASEDIR`
+  Base directory passed to `depmod -b`. Default: `/`.
 
 ## Configuration
 
 > [!IMPORTANT]
-> All parameters must be the same between Client and Server, except for Jc, Jmin, and Jmax - these may vary.
+> All parameters must be the same between client and server, except for Jc,
+> Jmin, and Jmax. Those three may vary.
 
-- Jc — 1 ≤ Jc ≤ 128; recommended range is from 4 to 12 inclusive
-- Jmin — Jmax > Jmin < 1280*; recommended value is 8
-- Jmax — Jmin < Jmax ≤ 1280*; recommended value is 80
-- S1 — S1 ≤ 1132* (1280* - 148 = 1132); S1 + 56 ≠ S2; recommended range is from 15 to 150 inclusive
-- S2 — S2 ≤ 1188* (1280* - 92 = 1188); recommended range is from 15 to 150 inclusive
-- H1/H2/H3/H4 — must be unique among each other; recommended range is from 5 to 2147483647 inclusive
+- Jc: `1 <= Jc <= 128`; recommended range is 4 to 12 inclusive.
+- Jmin: `Jmax > Jmin < 1280`; recommended value is 8.
+- Jmax: `Jmin < Jmax <= 1280`; recommended value is 80.
+- S1: `S1 <= 1132` when assuming an MTU of 1280; `S1 + 56 != S2`;
+  recommended range is 15 to 150 inclusive.
+- S2: `S2 <= 1188` when assuming an MTU of 1280; recommended range is 15 to
+  150 inclusive.
+- H1/H2/H3/H4: must be unique among each other; recommended range is 5 to
+  2147483647 inclusive.
 
-`* Assuming a basic internet connection with an MTU value of 1280.`
+The MTU-derived values above assume a basic internet connection with an MTU of
+1280.
 
 ## Troubleshooting
 
-> [!TIP]
-> Please check [Ubuntu Server documentation](https://documentation.ubuntu.com/server/how-to/wireguard-vpn/troubleshooting) for more troubleshooting steps.
+### Missing kernel headers
+
+If the build fails because the kernel build directory cannot be found, install
+headers for the exact kernel returned by:
+
+```shell
+uname -r
+```
+
+Then verify:
+
+```shell
+test -d /lib/modules/$(uname -r)/build
+```
+
+### DKMS is not installed
+
+`sudo make install` requires DKMS. If DKMS is unavailable, install it with your
+distribution package manager and run `sudo make install` again.
+
+### Secure Boot blocks module loading
+
+On Secure Boot systems, unsigned out-of-tree kernel modules may fail to load.
+Check the kernel log:
+
+```shell
+dmesg -T | grep -i 'tcp-wg\|module\|lockdown\|signature'
+```
+
+Either sign the DKMS-built module according to your distribution's Secure Boot
+workflow or disable Secure Boot for testing.
+
+### Module is installed but not loaded
+
+Load it manually and inspect the kernel log:
+
+```shell
+sudo modprobe tcp-wg
+dmesg -T | tail -100
+```
 
 ### Enable debug logging
 
-To get more details, you can enable the dynamic debug feature for the module:
+To get more details, enable dynamic debug for the module:
 
 ```shell
-echo "module amneziawg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
+echo "module tcp-wg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
 ```
 
-This will log messages to dmesg, which can be watched live with:
+Watch logs live with:
+
 ```shell
 dmesg -wT
 ```
 
-### Low space on `/tmp` filesystem
+### Stale DKMS state
 
-Most installation instructions above assume that you have enough space in system's `/tmp` partition (as setup script needs 
-to manipulate with kernel's sourcetree which is pretty huge).
-
-If you can not afford enough space in your `/tmp`, you may override temporary dir by setting `AWG_TEMP_DIR` environment variable
-before the installation:
+If DKMS reports a stale or broken build for this module, remove the version and
+install again:
 
 ```shell
-export AWG_TEMP_DIR="/home/ubuntu/tmp"
+sudo dkms remove -m tcp-wg -v 1.0.0 --all
+sudo make install
 ```
-
-This setting should persist for future and will not require repeating.
-
-### Kernel sourcetree could not be found automatically
-
-In some rare cases, setup script may not find your kernel's sourcetree automatically. You may find appropriate sources by yourself
-then and link them to DKMS module sources, e.g.
-
-```shell
-ln -s /path/to/your/kernel/sources /usr/src/amneziawg-1.0.0/kernel
-```
-
-Reinstall the package thereafter and you should get everything working.
-
-Should you upgrade your kernel in the future, please remember that you may also need refresh sourcetree and update symlinks.
 
 ## License
 

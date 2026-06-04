@@ -17,7 +17,7 @@
 #endif
 #include <linux/ip.h>
 #include <linux/ipv6.h>
-#include <linux/udp.h>
+#include <linux/tcp.h>
 #include <net/ip_tunnels.h>
 
 /* Must be called with bh disabled. */
@@ -27,7 +27,7 @@ static void update_rx_stats(struct wg_peer *peer, size_t len)
 	peer->rx_bytes += len;
 }
 
-static size_t prepare_awg_message(struct sk_buff *skb, struct wg_device *wg)
+static size_t prepare_tcp_wg_message(struct sk_buff *skb, struct wg_device *wg)
 {
 	if (skb_is_nonlinear(skb) && unlikely(skb_linearize(skb))) {
 		net_dbg_skb_ratelimited("%s: non-linear sk_buff from %pISpfsc could not be linearized, dropping packet\n",
@@ -54,7 +54,7 @@ static size_t prepare_awg_message(struct sk_buff *skb, struct wg_device *wg)
 	if (skb->len == wg->junk_size[MSGIDX_HANDSHAKE_COOKIE] + MESSAGE_COOKIE_REPLY_SIZE) {
 		skb_pull(skb, wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
 		if (mh_validate(SKB_TYPE_LE32(skb), &wg->headers[MSGIDX_HANDSHAKE_COOKIE]))
-			return MESSAGE_HANDSHAKE_COOKIE;
+			return MESSAGE_COOKIE_REPLY_SIZE;
 		else
 			skb_push(skb, wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
 	}
@@ -75,31 +75,45 @@ static size_t prepare_awg_message(struct sk_buff *skb, struct wg_device *wg)
 
 static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 {
-	size_t data_offset, data_len, header_len;
-	struct udphdr *udp;
+	size_t data_offset, data_len, header_len, packet_len, tcp_len;
+	struct tcphdr *tcp;
+	u8 proto;
 
 	if (unlikely(!wg_check_packet_protocol(skb) ||
-		     skb_transport_header(skb) < skb->head ||
-		     (skb_transport_header(skb) + sizeof(struct udphdr)) >
-			     skb_tail_pointer(skb)))
+		     skb_transport_header(skb) < skb->head))
 		return -EINVAL; /* Bogus IP header */
-	udp = udp_hdr(skb);
-	data_offset = (u8 *)udp - skb->data;
-	if (unlikely(data_offset > U16_MAX ||
-		     data_offset + sizeof(struct udphdr) > skb->len))
-		/* Packet has offset at impossible location or isn't big enough
-		 * to have UDP fields.
-		 */
+
+	if (skb->protocol == htons(ETH_P_IP))
+		proto = ip_hdr(skb)->protocol;
+	else if (IS_ENABLED(CONFIG_IPV6) && skb->protocol == htons(ETH_P_IPV6))
+		proto = ipv6_hdr(skb)->nexthdr;
+	else
 		return -EINVAL;
-	data_len = ntohs(udp->len);
-	if (unlikely(data_len < sizeof(struct udphdr) ||
-		     data_len > skb->len - data_offset))
-		/* UDP packet is reporting too small of a size or lying about
-		 * its size.
-		 */
+
+	if (proto != IPPROTO_TCP)
 		return -EINVAL;
-	data_len -= sizeof(struct udphdr);
-	data_offset = (u8 *)udp + sizeof(struct udphdr) - skb->data;
+
+	if (unlikely((skb_transport_header(skb) + sizeof(struct tcphdr)) >
+		     skb_tail_pointer(skb)))
+		return -EINVAL;
+	tcp = tcp_hdr(skb);
+	tcp_len = tcp->doff * 4;
+	data_offset = (u8 *)tcp - skb->data;
+	if (unlikely(tcp_len < sizeof(struct tcphdr) ||
+		     data_offset > U16_MAX ||
+		     data_offset + tcp_len > skb->len))
+		return -EINVAL;
+	if (skb->protocol == htons(ETH_P_IP))
+		packet_len = ntohs(ip_hdr(skb)->tot_len);
+	else
+		packet_len = sizeof(struct ipv6hdr) +
+			     ntohs(ipv6_hdr(skb)->payload_len);
+	if (unlikely(packet_len > skb->len ||
+		     packet_len < data_offset + tcp_len))
+		return -EINVAL;
+	data_len = packet_len - data_offset - tcp_len;
+	data_offset = (u8 *)tcp + tcp_len - skb->data;
+
 	if (unlikely(!pskb_may_pull(skb,
 				data_offset + sizeof(struct message_header)) ||
 		     pskb_trim(skb, data_len + data_offset) < 0))
@@ -108,7 +122,7 @@ static int prepare_skb_header(struct sk_buff *skb, struct wg_device *wg)
 	if (unlikely(skb->len != data_len))
 		/* Final len does not agree with calculated len */
 		return -EINVAL;
-	header_len = prepare_awg_message(skb, wg);
+	header_len = prepare_tcp_wg_message(skb, wg);
 	if (unlikely(!header_len))
 		return -EINVAL;
 	__skb_push(skb, data_offset);

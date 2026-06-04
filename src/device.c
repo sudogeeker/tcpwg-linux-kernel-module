@@ -256,9 +256,6 @@ static void wg_destruct(struct net_device *dev)
 	struct wg_device *wg = netdev_priv(dev);
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
-		jp_spec_free(&wg->ispecs[i]);
-
 	rtnl_lock();
 	list_del(&wg->device_list);
 	rtnl_unlock();
@@ -274,6 +271,8 @@ static void wg_destruct(struct net_device *dev)
 	wg_packet_queue_free(&wg->handshake_queue, true);
 	wg_packet_queue_free(&wg->decrypt_queue, false);
 	wg_packet_queue_free(&wg->encrypt_queue, false);
+	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
+		jp_spec_free(&wg->ispecs[i]);
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
 	wg_ratelimiter_uninit();
 	memzero_explicit(&wg->static_identity, sizeof(wg->static_identity));
@@ -288,7 +287,7 @@ static void wg_destruct(struct net_device *dev)
 	free_netdev(dev);
 }
 
-static const struct device_type device_type = { .name = KBUILD_MODNAME };
+static const struct device_type device_type = { .name = TCP_WG_LINK_NAME };
 
 static void wg_setup(struct net_device *dev)
 {
@@ -296,7 +295,7 @@ static void wg_setup(struct net_device *dev)
 	enum { WG_NETDEV_FEATURES = NETIF_F_HW_CSUM | NETIF_F_RXCSUM |
 				    NETIF_F_SG | NETIF_F_GSO |
 				    NETIF_F_GSO_SOFTWARE | NETIF_F_HIGHDMA };
-	const int overhead = MESSAGE_MINIMUM_LENGTH + sizeof(struct udphdr) +
+	const int overhead = MESSAGE_MINIMUM_LENGTH + sizeof(struct tcphdr) +
 			     max(sizeof(struct ipv6hdr), sizeof(struct iphdr));
 
 	dev->netdev_ops = &netdev_ops;
@@ -373,6 +372,7 @@ static int wg_newlink(struct net_device *dev,
 	wg_allowedips_init(&wg->peer_allowedips);
 	wg_cookie_checker_init(&wg->cookie_checker, wg);
 	INIT_LIST_HEAD(&wg->peer_list);
+	INIT_LIST_HEAD(&wg->tcpwg_list);
 	wg->device_update_gen = 1;
 
 	wg->peer_hashtable = wg_pubkey_hashtable_alloc();
@@ -480,7 +480,7 @@ static int wg_newlink_old(struct net *src_net, struct net_device *dev,
 #endif
 
 static struct rtnl_link_ops link_ops __read_mostly = {
-	.kind			= KBUILD_MODNAME,
+	.kind			= TCP_WG_LINK_NAME,
 	.priv_size		= sizeof(struct wg_device),
 	.setup			= wg_setup,
 #ifndef COMPAT_CANNOT_USE_RTNL_NEWLINK_PARAMS
@@ -555,71 +555,73 @@ void wg_device_uninit(void)
 	rcu_barrier();
 }
 
-int wg_device_handle_post_config(struct wg_device *wg)
+int wg_device_validate_advanced_security_config(
+	struct wg_device *wg, u16 jc, u16 *jmin, u16 *jmax,
+	const u16 junk_size[4], const struct magic_header headers[4])
 {
-	int err;
+	u16 adjusted_jmax = *jmax;
 	int i, j;
 
-	if (!wg->advanced_security)
-		return 0;
-
-	if (wg->jc < 0) {
-		net_dbg_ratelimited("%s: JunkPacketCount should be non negative\n", wg->dev->name);
-		return -EINVAL;
+	if (jc && *jmin == adjusted_jmax) {
+		if (adjusted_jmax >= MESSAGE_MAX_SIZE - 1) {
+			net_dbg_ratelimited("%s: JunkPacketMaxSize: %d; should be smaller than maxSegmentSize: %d\n",
+					    wg->dev->name, adjusted_jmax, MESSAGE_MAX_SIZE);
+			return -EINVAL;
+		}
+		adjusted_jmax++;
 	}
 
-	if (wg->jc && wg->jmin == wg->jmax)
-		wg->jmax++;
-
-	if (wg->jmax >= MESSAGE_MAX_SIZE) {
+	if (adjusted_jmax >= MESSAGE_MAX_SIZE) {
 		net_dbg_ratelimited("%s: JunkPacketMaxSize: %d; should be smaller than maxSegmentSize: %d\n",
-							wg->dev->name, wg->jmax, MESSAGE_MAX_SIZE);
+				    wg->dev->name, adjusted_jmax, MESSAGE_MAX_SIZE);
 		return -EINVAL;
 	}
 
-	if (wg->jmax && wg->jmax < wg->jmin) {
+	if (adjusted_jmax && adjusted_jmax < *jmin) {
 		net_dbg_ratelimited("%s: maxSize: %d; should be greater than minSize: %d\n",
-							wg->dev->name, wg->jmax, wg->jmin);
+				    wg->dev->name, adjusted_jmax, *jmin);
 		return -EINVAL;
 	}
 
-	if (wg->junk_size[MSGIDX_HANDSHAKE_INIT] + MESSAGE_INITIATION_SIZE > MESSAGE_MAX_SIZE) {
+	if (junk_size[MSGIDX_HANDSHAKE_INIT] > MESSAGE_MAX_SIZE - MESSAGE_INITIATION_SIZE) {
 		net_dbg_ratelimited("%s: S1 is too large\n", wg->dev->name);
 		return -EINVAL;
 	}
 
-	if (wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE] + MESSAGE_RESPONSE_SIZE > MESSAGE_MAX_SIZE) {
+	if (junk_size[MSGIDX_HANDSHAKE_RESPONSE] > MESSAGE_MAX_SIZE - MESSAGE_RESPONSE_SIZE) {
 		net_dbg_ratelimited("%s: S2 is too large\n", wg->dev->name);
 		return -EINVAL;
 	}
 
-	if (wg->junk_size[MSGIDX_HANDSHAKE_COOKIE] + MESSAGE_COOKIE_REPLY_SIZE > MESSAGE_MAX_SIZE) {
+	if (junk_size[MSGIDX_HANDSHAKE_COOKIE] > MESSAGE_MAX_SIZE - MESSAGE_COOKIE_REPLY_SIZE) {
 		net_dbg_ratelimited("%s: S3 is too large\n", wg->dev->name);
 		return -EINVAL;
 	}
 
-	if (wg->junk_size[MSGIDX_TRANSPORT] + MESSAGE_TRANSPORT_SIZE > MESSAGE_MAX_SIZE) {
+	if (junk_size[MSGIDX_TRANSPORT] > MESSAGE_MAX_SIZE - MESSAGE_TRANSPORT_SIZE) {
 		net_dbg_ratelimited("%s: S4 is too large\n", wg->dev->name);
 		return -EINVAL;
 	}
 
 	for (i = 0; i < ARRAY_SIZE(wg->headers); ++i) {
 		for (j = i + 1; j < ARRAY_SIZE(wg->headers); ++j) {
-			if (!(wg->headers[j].end < wg->headers[i].start ||
-				  wg->headers[i].end < wg->headers[j].start)) {
+			if (!(headers[j].end < headers[i].start ||
+			      headers[i].end < headers[j].start)) {
 				net_dbg_ratelimited("%s: H%d and H%d ranges must not overlap\n", wg->dev->name, i + 1, j + 1);
 				return -EINVAL;
 			}
 		}
 	}
 
-	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i) {
-		err = jp_spec_setup(&wg->ispecs[i]);
-		if (err) {
-			net_dbg_ratelimited("%s: I%d-packet invalid format\n", wg->dev->name, i + 1);
-			return err;
-		}
-	}
-
+	*jmax = adjusted_jmax;
 	return 0;
+}
+
+int wg_device_handle_post_config(struct wg_device *wg)
+{
+	if (!wg->advanced_security)
+		return 0;
+
+	return wg_device_validate_advanced_security_config(
+		wg, wg->jc, &wg->jmin, &wg->jmax, wg->junk_size, wg->headers);
 }

@@ -47,13 +47,13 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
 	{
 		spec = &wg->ispecs[i];
+		mutex_lock(&spec->lock);
 		if (spec->pkt_size > 0) {
-			mutex_lock(&spec->lock);
 			jp_spec_applymods(spec, peer);
 			wg_socket_send_buffer_to_peer(peer, spec->pkt, spec->pkt_size, 0, 0);
 			atomic_inc(&peer->jp_packet_counter);
-			mutex_unlock(&spec->lock);
 		}
+		mutex_unlock(&spec->lock);
 	}
 	
 	if (wg->jc && wg->jmax) {
@@ -63,6 +63,8 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 
 		junk_packet_count = wg->jc;
 		buffer = kzalloc(wg->jmax, GFP_KERNEL);
+		if (unlikely(!buffer))
+			goto skip_dummy_junk;
 
 		while (junk_packet_count-- > 0) {
 			junk_packet_size = (u16) get_random_u32_inclusive(wg->jmin, wg->jmax);
@@ -74,6 +76,7 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 
 		kfree(buffer);
 	}
+skip_dummy_junk:
 
 	if (wg_noise_handshake_create_initiation(&packet, &peer->handshake, mh_genheader(&wg->headers[MSGIDX_HANDSHAKE_INIT]))) {
 		wg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);

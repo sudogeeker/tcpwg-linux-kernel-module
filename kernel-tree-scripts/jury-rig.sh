@@ -11,6 +11,6 @@ if [[ ! -e $K/net/Kconfig ]]; then
 	exit 1
 fi
 
-ln -sfT "$WG" "$K/net/wireguard"
-sed -i "/^obj-\\\$(CONFIG_NETFILTER).*+=/a obj-\$(CONFIG_WIREGUARD) += wireguard/" "$K/net/Makefile"
-sed -i "/^if INET\$/a source \"net/wireguard/Kconfig\"" "$K/net/Kconfig"
+ln -sfT "$WG" "$K/net/tcp-wg"
+sed -i "/^obj-\\\$(CONFIG_NETFILTER).*+=/a obj-\$(CONFIG_TCP_WG) += tcp-wg/" "$K/net/Makefile"
+sed -i "/^if INET\$/a source \"net/tcp-wg/Kconfig\"" "$K/net/Kconfig"
