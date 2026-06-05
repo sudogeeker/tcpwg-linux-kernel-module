@@ -146,6 +146,9 @@ static void tcpwg_tunnel_xmit4(struct rtable *rt, struct sock *sock,
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 12, 0) || LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0)
 			   , false
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+			   , 0
+#endif
 	     );
 }
 
@@ -458,7 +461,11 @@ static void tcpwg_tunnel_xmit6(struct dst_entry *dst, struct sock *sock,
 
 	tcpwg_setup_skb_sock(sock, skb);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 6, 0) || defined(ISRHEL9)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	ip6tunnel_xmit(sock, skb, dev, 0);
+#else
 	ip6tunnel_xmit(sock, skb, dev);
+#endif
 #else
 	ip6tunnel_xmit(skb, dev);
 #endif
