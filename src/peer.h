@@ -41,7 +41,6 @@ enum tcpwg_fake_state {
 	TCPWG_FAKE_SYN_SENT,
 	TCPWG_FAKE_SYN_RECEIVED,
 	TCPWG_FAKE_ESTABLISHED,
-	TCPWG_FAKE_FIN_WAIT,
 	TCPWG_FAKE_CLOSE_WAIT,
 };
 
@@ -57,7 +56,6 @@ struct tcpwg_fake_tcp {
 	unsigned long state_since;
 	unsigned long last_seen;
 	unsigned long last_data;
-	unsigned long last_keepalive_sent;
 
 	struct endpoint tuple;
 	bool tuple_valid;
@@ -89,6 +87,7 @@ struct wg_peer {
 	u16 persistent_keepalive_interval;
 	bool timer_need_another_keepalive;
 	bool sent_lastminute_handshake;
+	unsigned long last_handshake_jiffies;
 	struct timespec64 walltime_last_handshake;
 	struct kref refcount;
 	struct rcu_head rcu;

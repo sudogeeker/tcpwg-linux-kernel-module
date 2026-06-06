@@ -42,15 +42,10 @@ enum {
 #define TCPWG_FAKE_HANDSHAKE_TIMEOUT (3 * HZ)
 #define TCPWG_FAKE_KEEPALIVE_INTERVAL (20 * HZ)
 #define TCPWG_FAKE_IDLE_TIMEOUT (120 * HZ)
+#define TCPWG_FAKE_EPOCH_TIMEOUT (REJECT_AFTER_TIME * HZ)
 #define TCPWG_PEERLESS_BUCKET_BITS 8
 #define TCPWG_PEERLESS_BUCKETS (1U << TCPWG_PEERLESS_BUCKET_BITS)
 #define TCPWG_PEERLESS_MAX 4096
-
-static atomic64_t tcpwg_fake_syn_sent = ATOMIC64_INIT(0);
-static atomic64_t tcpwg_fake_synack_sent = ATOMIC64_INIT(0);
-static atomic64_t tcpwg_fake_ack_sent = ATOMIC64_INIT(0);
-static atomic64_t tcpwg_fake_established = ATOMIC64_INIT(0);
-static atomic64_t tcpwg_fake_endpoint_reset = ATOMIC64_INIT(0);
 
 struct tcpwg_peerless_flow {
 	struct hlist_node hnode;
@@ -374,22 +369,43 @@ static int tcpwg_send_control_from_skb(struct wg_device *wg,
 				       u32 seq, u32 ack_seq)
 {
 	struct endpoint endpoint;
-	int ret;
 
 	if (wg_socket_endpoint_from_skb(&endpoint, skb))
 		return -EINVAL;
 
-	ret = tcpwg_send_empty(wg, &endpoint, flags, seq, ack_seq);
-	if (!ret) {
-		if ((flags & (TCPWG_SYN | TCPWG_ACK)) ==
-		    (TCPWG_SYN | TCPWG_ACK))
-			atomic64_inc(&tcpwg_fake_synack_sent);
-		else if (flags & TCPWG_SYN)
-			atomic64_inc(&tcpwg_fake_syn_sent);
-		else if (flags & TCPWG_ACK)
-			atomic64_inc(&tcpwg_fake_ack_sent);
-	}
-	return ret;
+	return tcpwg_send_empty(wg, &endpoint, flags, seq, ack_seq);
+}
+
+static bool tcpwg_fake_epoch_expired(const struct wg_peer *peer,
+				     const struct tcpwg_fake_tcp *state,
+				     unsigned long now)
+{
+	unsigned long latest = READ_ONCE(peer->last_handshake_jiffies);
+	unsigned long base = state->state_since;
+
+	if (latest && time_after(latest, base))
+		base = latest;
+
+	return time_after_eq(now, base + TCPWG_FAKE_EPOCH_TIMEOUT);
+}
+
+static void tcpwg_fake_start_syn_locked(struct wg_peer *peer,
+					const struct endpoint *endpoint,
+					unsigned long now, u32 *syn_seq)
+{
+	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
+
+	state->state = TCPWG_FAKE_SYN_SENT;
+	state->local_isn = get_random_u32();
+	state->peer_isn = 0;
+	state->tx_seq = state->local_isn;
+	state->rx_seq = 0;
+	state->state_since = now;
+	state->last_seen = now;
+	state->last_data = now;
+	state->tuple = *endpoint;
+	state->tuple_valid = true;
+	*syn_seq = state->local_isn;
 }
 
 static unsigned int tcpwg_peerless_bucket(struct wg_device *wg,
@@ -423,8 +439,9 @@ static bool tcpwg_peerless_expired(const struct tcpwg_peerless_flow *flow,
 					  TCPWG_FAKE_HANDSHAKE_TIMEOUT);
 	case TCPWG_FAKE_ESTABLISHED:
 		return time_after_eq(now, flow->last_data +
-					  TCPWG_FAKE_IDLE_TIMEOUT);
-	case TCPWG_FAKE_FIN_WAIT:
+					  TCPWG_FAKE_IDLE_TIMEOUT) ||
+		       time_after_eq(now, flow->state_since +
+					  TCPWG_FAKE_EPOCH_TIMEOUT);
 	case TCPWG_FAKE_CLOSE_WAIT:
 	case TCPWG_FAKE_CLOSED:
 	default:
@@ -538,6 +555,19 @@ static bool tcpwg_peerless_create_syn(struct wg_device *wg,
 		tcpwg_peerless_unlink_locked(flow, &free_list);
 		flow = NULL;
 	}
+	if (flow && flow->state == TCPWG_FAKE_ESTABLISHED) {
+		flow->state = TCPWG_FAKE_SYN_RECEIVED;
+		flow->local_isn = get_random_u32();
+		flow->peer_isn = seq;
+		flow->tx_seq = flow->local_isn + 1;
+		flow->rx_seq = seq + 1;
+		flow->state_since = now;
+		flow->last_seen = now;
+		flow->last_data = now;
+		*local_isn = flow->local_isn;
+		send_synack = true;
+		goto out;
+	}
 	if (flow) {
 		flow->last_seen = now;
 		goto out;
@@ -610,7 +640,6 @@ out:
 	spin_unlock_bh(&tcpwg_peerless_lock);
 	tcpwg_peerless_free_list(&free_list);
 	if (established) {
-		atomic64_inc(&tcpwg_fake_established);
 		tcpwg_peerless_schedule_maintenance();
 	}
 	return true;
@@ -808,7 +837,6 @@ static bool tcpwg_peerless_bind_to_peer_locked(struct wg_peer *peer,
 	state->state_since = flow->state_since;
 	state->last_seen = now;
 	state->last_data = flow->last_data;
-	state->last_keepalive_sent = 0;
 	state->tuple = *endpoint;
 	state->tuple_valid = true;
 	tcpwg_peerless_unlink_locked(flow, &free_list);
@@ -833,10 +861,8 @@ static void tcpwg_fake_reset_locked(struct wg_peer *peer,
 	state->state_since = jiffies;
 	state->last_seen = jiffies;
 	state->last_data = jiffies;
-	state->last_keepalive_sent = 0;
 	state->tuple = *ep;
 	state->tuple_valid = true;
-	atomic64_inc(&tcpwg_fake_endpoint_reset);
 }
 
 static void tcpwg_fake_close_locked(struct wg_peer *peer)
@@ -848,7 +874,6 @@ static void tcpwg_fake_close_locked(struct wg_peer *peer)
 	state->rx_seq = 0;
 	state->state_since = jiffies;
 	state->last_seen = jiffies;
-	state->last_keepalive_sent = 0;
 }
 
 static void tcpwg_fake_schedule_maintenance(struct wg_peer *peer,
@@ -881,6 +906,10 @@ static bool tcpwg_fake_accept_data(struct wg_peer *peer,
 	    !state->tuple_valid ||
 	    !tcpwg_endpoint_equal(&state->tuple, endpoint))
 		goto out;
+	if (tcpwg_fake_epoch_expired(peer, state, jiffies)) {
+		tcpwg_fake_close_locked(peer);
+		goto out;
+	}
 
 	end_seq = seq + payload_len;
 	if (seq != state->rx_seq)
@@ -907,6 +936,7 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 	struct tcpwg_fake_tcp *state;
 	u32 seq = ntohl(tcp->seq), ack_seq = ntohl(tcp->ack_seq);
 	u32 local_isn = 0, tx_seq = 0, rx_seq = 0;
+	unsigned long now = jiffies;
 	bool send_ack = false, established = false;
 
 	if (!peer)
@@ -914,20 +944,16 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 						     payload_len);
 
 	if (tcp->rst) {
-		if (peer) {
-			state = &peer->fake_tcp;
-			spin_lock_bh(&state->lock);
-			if (state->tuple_valid &&
-			    tcpwg_endpoint_equal(&state->tuple, endpoint))
-				tcpwg_fake_close_locked(peer);
-			spin_unlock_bh(&state->lock);
-		}
+		state = &peer->fake_tcp;
+		spin_lock_bh(&state->lock);
+		if (state->tuple_valid &&
+		    tcpwg_endpoint_equal(&state->tuple, endpoint))
+			tcpwg_fake_close_locked(peer);
+		spin_unlock_bh(&state->lock);
 		return true;
 	}
 
 	if (tcp->fin) {
-		if (!peer)
-			return true;
 		state = &peer->fake_tcp;
 		spin_lock_bh(&state->lock);
 		if (state->state == TCPWG_FAKE_ESTABLISHED &&
@@ -953,25 +979,30 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 		spin_lock_bh(&state->lock);
 		if (state->tuple_valid &&
 		    tcpwg_endpoint_equal(&state->tuple, endpoint) &&
-		    ((state->state == TCPWG_FAKE_SYN_RECEIVED &&
-		      time_before_eq(jiffies, state->state_since +
-					     TCPWG_FAKE_HANDSHAKE_TIMEOUT)) ||
-		     state->state == TCPWG_FAKE_ESTABLISHED)) {
+		    state->state == TCPWG_FAKE_SYN_RECEIVED &&
+		    time_before_eq(now, state->state_since +
+					TCPWG_FAKE_HANDSHAKE_TIMEOUT)) {
 			spin_unlock_bh(&state->lock);
 			return true;
 		}
+		if (state->tuple_valid &&
+		    tcpwg_endpoint_equal(&state->tuple, endpoint) &&
+		    state->state == TCPWG_FAKE_SYN_SENT) {
+			local_isn = state->local_isn;
+			state->tx_seq = state->local_isn + 1;
+		} else {
+			state->local_isn = get_random_u32();
+			local_isn = state->local_isn;
+			state->tx_seq = state->local_isn + 1;
+		}
 		state->state = TCPWG_FAKE_SYN_RECEIVED;
-		state->local_isn = get_random_u32();
 		state->peer_isn = seq;
-		state->tx_seq = state->local_isn + 1;
 		state->rx_seq = seq + 1;
-		state->state_since = jiffies;
-		state->last_seen = jiffies;
-		state->last_data = jiffies;
-		state->last_keepalive_sent = 0;
+		state->state_since = now;
+		state->last_seen = now;
+		state->last_data = now;
 		state->tuple = *endpoint;
 		state->tuple_valid = true;
-		local_isn = state->local_isn;
 		spin_unlock_bh(&state->lock);
 
 		tcpwg_send_control_from_skb(wg, skb, TCPWG_SYN | TCPWG_ACK,
@@ -982,11 +1013,11 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 	}
 
 	if (tcp->syn && tcp->ack) {
-		if (!peer)
-			return true;
 		state = &peer->fake_tcp;
 		spin_lock_bh(&state->lock);
-		if (state->state == TCPWG_FAKE_SYN_SENT &&
+		if ((state->state == TCPWG_FAKE_SYN_SENT ||
+		     (state->state == TCPWG_FAKE_SYN_RECEIVED &&
+		      seq == state->peer_isn)) &&
 		    state->tuple_valid &&
 		    tcpwg_endpoint_equal(&state->tuple, endpoint) &&
 		    ack_seq == state->local_isn + 1) {
@@ -994,10 +1025,9 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 			state->rx_seq = seq + 1;
 			state->tx_seq = state->local_isn + 1;
 			state->state = TCPWG_FAKE_ESTABLISHED;
-			state->state_since = jiffies;
-			state->last_seen = jiffies;
-			state->last_data = jiffies;
-			state->last_keepalive_sent = 0;
+			state->state_since = now;
+			state->last_seen = now;
+			state->last_data = now;
 			tx_seq = state->tx_seq;
 			rx_seq = state->rx_seq;
 			send_ack = true;
@@ -1008,7 +1038,6 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 			tcpwg_send_control_from_skb(wg, skb, TCPWG_ACK,
 						    tx_seq, rx_seq);
 		if (established) {
-			atomic64_inc(&tcpwg_fake_established);
 			tcpwg_fake_schedule_maintenance(peer,
 					TCPWG_FAKE_KEEPALIVE_INTERVAL);
 		}
@@ -1016,8 +1045,6 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 	}
 
 	if (tcp->ack && !payload_len) {
-		if (!peer)
-			return true;
 		state = &peer->fake_tcp;
 		spin_lock_bh(&state->lock);
 		if (!state->tuple_valid ||
@@ -1031,17 +1058,15 @@ static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
 		    ack_seq == state->local_isn + 1) {
 			state->tx_seq = state->local_isn + 1;
 			state->state = TCPWG_FAKE_ESTABLISHED;
-			state->state_since = jiffies;
-			state->last_seen = jiffies;
-			state->last_data = jiffies;
-			state->last_keepalive_sent = 0;
+			state->state_since = now;
+			state->last_seen = now;
+			state->last_data = now;
 			established = true;
 		} else if (state->state == TCPWG_FAKE_ESTABLISHED) {
-			state->last_seen = jiffies;
+			state->last_seen = now;
 		}
 		spin_unlock_bh(&state->lock);
 		if (established) {
-			atomic64_inc(&tcpwg_fake_established);
 			tcpwg_fake_schedule_maintenance(peer,
 					TCPWG_FAKE_KEEPALIVE_INTERVAL);
 		}
@@ -1514,9 +1539,9 @@ void tcpwg_fake_maintenance_work(struct work_struct *work)
 	unsigned long now = jiffies, next_delay = 0;
 	unsigned long keepalive_at, idle_close_at;
 	struct endpoint endpoint;
+	bool send_syn = false;
 	bool send_keepalive = false;
 	u32 seq = 0, ack = 0;
-	int ret;
 
 	read_lock_bh(&peer->endpoint_lock);
 	spin_lock_bh(&state->lock);
@@ -1534,6 +1559,18 @@ void tcpwg_fake_maintenance_work(struct work_struct *work)
 		idle_close_at = state->last_data + TCPWG_FAKE_IDLE_TIMEOUT;
 		if (time_after_eq(now, idle_close_at)) {
 			tcpwg_fake_close_locked(peer);
+		} else if (tcpwg_fake_epoch_expired(peer, state, now)) {
+			if (state->tuple_valid &&
+			    tcpwg_endpoint_equal(&state->tuple,
+						 &peer->endpoint)) {
+				endpoint = peer->endpoint;
+				tcpwg_fake_start_syn_locked(peer, &endpoint,
+							    now, &seq);
+				send_syn = true;
+				next_delay = TCPWG_FAKE_HANDSHAKE_TIMEOUT;
+			} else {
+				tcpwg_fake_close_locked(peer);
+			}
 		} else {
 			keepalive_at = state->last_seen +
 				       TCPWG_FAKE_KEEPALIVE_INTERVAL;
@@ -1545,7 +1582,6 @@ void tcpwg_fake_maintenance_work(struct work_struct *work)
 				seq = state->tx_seq;
 				ack = state->rx_seq;
 				state->last_seen = now;
-				state->last_keepalive_sent = now;
 				send_keepalive = true;
 				keepalive_at = now +
 					       TCPWG_FAKE_KEEPALIVE_INTERVAL;
@@ -1553,8 +1589,7 @@ void tcpwg_fake_maintenance_work(struct work_struct *work)
 			next_delay = min(tcpwg_fake_delay_until(keepalive_at),
 					 tcpwg_fake_delay_until(idle_close_at));
 		}
-	} else if (state->state == TCPWG_FAKE_FIN_WAIT ||
-		   state->state == TCPWG_FAKE_CLOSE_WAIT) {
+	} else if (state->state == TCPWG_FAKE_CLOSE_WAIT) {
 		if (time_after_eq(now, state->state_since +
 				       TCPWG_FAKE_HANDSHAKE_TIMEOUT))
 			tcpwg_fake_close_locked(peer);
@@ -1566,12 +1601,10 @@ void tcpwg_fake_maintenance_work(struct work_struct *work)
 	spin_unlock_bh(&state->lock);
 	read_unlock_bh(&peer->endpoint_lock);
 
-	if (send_keepalive) {
-		ret = tcpwg_send_empty(peer->device, &endpoint, TCPWG_ACK,
-				       seq, ack);
-		if (!ret)
-			atomic64_inc(&tcpwg_fake_ack_sent);
-	}
+	if (send_syn)
+		tcpwg_send_empty(peer->device, &endpoint, TCPWG_SYN, seq, 0);
+	else if (send_keepalive)
+		tcpwg_send_empty(peer->device, &endpoint, TCPWG_ACK, seq, ack);
 	if (next_delay)
 		tcpwg_fake_schedule_maintenance(peer, next_delay);
 
@@ -1582,21 +1615,21 @@ static bool tcpwg_fake_prepare_data(struct wg_peer *peer, struct endpoint *ep,
 				    struct sk_buff *skb, u32 *seq, u32 *ack)
 {
 	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
-	bool send_syn = false;
+	unsigned long now = jiffies;
 	u32 syn_seq = 0;
-	int ret;
 
 	spin_lock_bh(&state->lock);
 	if (!state->tuple_valid || !tcpwg_endpoint_equal(&state->tuple, ep)) {
 		tcpwg_fake_reset_locked(peer, ep);
 	}
 
-	if (state->state == TCPWG_FAKE_ESTABLISHED) {
+	if (state->state == TCPWG_FAKE_ESTABLISHED &&
+	    !tcpwg_fake_epoch_expired(peer, state, now)) {
 		*seq = state->tx_seq;
 		*ack = state->rx_seq;
 		state->tx_seq += max_t(u32, 1U, skb->len);
-		state->last_seen = jiffies;
-		state->last_data = jiffies;
+		state->last_seen = now;
+		state->last_data = now;
 		spin_unlock_bh(&state->lock);
 		tcpwg_fake_schedule_maintenance(peer,
 				TCPWG_FAKE_KEEPALIVE_INTERVAL);
@@ -1605,35 +1638,18 @@ static bool tcpwg_fake_prepare_data(struct wg_peer *peer, struct endpoint *ep,
 
 	if ((state->state == TCPWG_FAKE_SYN_SENT ||
 	     state->state == TCPWG_FAKE_SYN_RECEIVED) &&
-	    time_before_eq(jiffies,
+	    time_before_eq(now,
 			   state->state_since + TCPWG_FAKE_HANDSHAKE_TIMEOUT)) {
 		spin_unlock_bh(&state->lock);
 		dev_kfree_skb(skb);
 		return false;
 	}
 
-	state->state = TCPWG_FAKE_SYN_SENT;
-	state->local_isn = get_random_u32();
-	state->peer_isn = 0;
-	state->tx_seq = state->local_isn;
-	state->rx_seq = 0;
-	state->state_since = jiffies;
-	state->last_seen = jiffies;
-	state->last_data = jiffies;
-	state->last_keepalive_sent = 0;
-	state->tuple = *ep;
-	state->tuple_valid = true;
-	syn_seq = state->local_isn;
-	send_syn = true;
+	tcpwg_fake_start_syn_locked(peer, ep, now, &syn_seq);
 	spin_unlock_bh(&state->lock);
 
-	if (send_syn) {
-		ret = tcpwg_send_empty(peer->device, ep, TCPWG_SYN, syn_seq, 0);
-		if (!ret)
-			atomic64_inc(&tcpwg_fake_syn_sent);
-		tcpwg_fake_schedule_maintenance(peer,
-				TCPWG_FAKE_HANDSHAKE_TIMEOUT);
-	}
+	tcpwg_send_empty(peer->device, ep, TCPWG_SYN, syn_seq, 0);
+	tcpwg_fake_schedule_maintenance(peer, TCPWG_FAKE_HANDSHAKE_TIMEOUT);
 	dev_kfree_skb(skb);
 	return false;
 }
@@ -1737,7 +1753,9 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 	struct wg_peer *peer = NULL;
 	struct tcpwg_fake_tcp *state;
 	size_t payload_len;
+	unsigned long now = jiffies;
 	u32 seq, ack_seq;
+	bool drop_reply = false;
 	bool used_fake_state = false;
 	bool used_peerless_state = false;
 	void* junk;
@@ -1768,14 +1786,24 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 		if (state->state == TCPWG_FAKE_ESTABLISHED &&
 		    state->tuple_valid &&
 		    tcpwg_endpoint_equal(&state->tuple, &endpoint)) {
-			seq = state->tx_seq;
-			ack_seq = state->rx_seq;
-			state->tx_seq += max_t(u32, 1U, skb->len);
-			state->last_seen = jiffies;
-			state->last_data = jiffies;
-			used_fake_state = true;
+			if (tcpwg_fake_epoch_expired(peer, state, now)) {
+				tcpwg_fake_close_locked(peer);
+				drop_reply = true;
+			} else {
+				seq = state->tx_seq;
+				ack_seq = state->rx_seq;
+				state->tx_seq += max_t(u32, 1U, skb->len);
+				state->last_seen = now;
+				state->last_data = now;
+				used_fake_state = true;
+			}
 		}
 		spin_unlock_bh(&state->lock);
+		if (drop_reply) {
+			kfree_skb(skb);
+			wg_peer_put(peer);
+			return 0;
+		}
 	}
 	if (!used_fake_state)
 		used_peerless_state = tcpwg_peerless_prepare_reply(wg,

@@ -197,6 +197,7 @@ void wg_timers_handshake_complete(struct wg_peer *peer)
 	timer_delete(&peer->timer_retransmit_handshake);
 	peer->timer_handshake_attempts = 0;
 	peer->sent_lastminute_handshake = false;
+	WRITE_ONCE(peer->last_handshake_jiffies, jiffies);
 	ktime_get_real_ts64(&peer->walltime_last_handshake);
 }
 
