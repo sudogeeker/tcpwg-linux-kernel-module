@@ -14,6 +14,8 @@
 #include <linux/netfilter.h>
 #include <linux/spinlock.h>
 #include <linux/kref.h>
+#include <linux/skbuff.h>
+#include <linux/workqueue.h>
 #include <net/dst_cache.h>
 
 struct wg_device;
@@ -34,6 +36,32 @@ struct endpoint {
 	};
 };
 
+enum tcpwg_fake_state {
+	TCPWG_FAKE_CLOSED = 0,
+	TCPWG_FAKE_SYN_SENT,
+	TCPWG_FAKE_SYN_RECV,
+	TCPWG_FAKE_ESTABLISHED,
+};
+
+struct tcpwg_fake_tcp {
+	spinlock_t lock;
+	u8 state;
+
+	u32 local_isn;
+	u32 peer_isn;
+	u32 tx_seq;
+	u32 rx_seq;
+
+	unsigned long last_syn_sent;
+	unsigned long last_seen;
+
+	struct endpoint tuple;
+	bool tuple_valid;
+
+	struct sk_buff_head pending_tx;
+	struct work_struct drain_work;
+};
+
 struct wg_peer {
 	struct wg_device *device;
 	struct prev_queue tx_queue, rx_queue;
@@ -44,8 +72,7 @@ struct wg_peer {
 	struct endpoint endpoint;
 	struct dst_cache endpoint_cache;
 	rwlock_t endpoint_lock;
-	u32 tcpwg_tx_seq, tcpwg_tx_ack_seq;
-	bool tcpwg_tx_seq_valid;
+	struct tcpwg_fake_tcp fake_tcp;
 	struct noise_handshake handshake;
 	atomic64_t last_sent_handshake;
 	struct work_struct transmit_handshake_work, clear_peer_work, transmit_packet_work;

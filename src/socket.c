@@ -10,7 +10,6 @@
 #include "messages.h"
 
 #include <linux/ctype.h>
-#include <linux/jhash.h>
 #include <linux/net.h>
 #include <linux/if_vlan.h>
 #include <linux/if_ether.h>
@@ -38,6 +37,16 @@ enum {
 	TCPWG_ACK = 0x10
 };
 
+#define TCPWG_FAKE_PENDING_MAX 256
+
+static atomic64_t tcpwg_fake_syn_sent = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_synack_sent = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_ack_sent = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_established = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_pending_queued = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_pending_dropped = ATOMIC64_INIT(0);
+static atomic64_t tcpwg_fake_endpoint_reset = ATOMIC64_INIT(0);
+
 static void tcpwg_fake_destructor(struct sk_buff *skb)
 {
 }
@@ -50,28 +59,6 @@ static u8 skb_outer_proto(const struct sk_buff *skb)
 		return ipv6_hdr(skb)->nexthdr;
 	return 0;
 }
-
-static u32 tcpwg_cookie_seq(__be32 src, __be32 dst, __be16 sport, __be16 dport)
-{
-	u32 words[] = { (__force u32)src, (__force u32)dst,
-			((__force u32)sport << 16) | (__force u32)dport };
-
-	return jhash(words, sizeof(words), 0x54435747);
-}
-
-#if IS_ENABLED(CONFIG_IPV6)
-static u32 tcpwg_cookie_seq6(const struct in6_addr *src,
-			     const struct in6_addr *dst,
-			     __be16 sport, __be16 dport)
-{
-	u32 words[9];
-
-	memcpy(words, src, sizeof(*src));
-	memcpy(words + 4, dst, sizeof(*dst));
-	words[8] = ((__force u32)sport << 16) | (__force u32)dport;
-	return jhash(words, sizeof(words), 0x54435736);
-}
-#endif
 
 static void tcpwg_fill_header(struct tcphdr *tcp, __be16 source, __be16 dest,
 			      u8 flags, u32 seq, u32 ack_seq)
@@ -251,32 +238,228 @@ static struct wg_device *tcpwg_lookup_device(struct net *net, __be16 port)
 	return ret;
 }
 
-static void tcpwg_send_control_from_skb(struct wg_device *wg,
-					const struct sk_buff *skb, u8 flags)
+static bool tcpwg_endpoint_equal(const struct endpoint *a,
+				 const struct endpoint *b)
 {
-	struct endpoint endpoint;
+	if (a->addr.sa_family != b->addr.sa_family)
+		return false;
+	if (a->addr.sa_family == AF_INET)
+		return a->addr4.sin_port == b->addr4.sin_port &&
+		       a->addr4.sin_addr.s_addr == b->addr4.sin_addr.s_addr;
+	if (IS_ENABLED(CONFIG_IPV6) && a->addr.sa_family == AF_INET6)
+		return a->addr6.sin6_port == b->addr6.sin6_port &&
+		       a->addr6.sin6_scope_id == b->addr6.sin6_scope_id &&
+		       ipv6_addr_equal(&a->addr6.sin6_addr,
+				       &b->addr6.sin6_addr);
+	return false;
+}
+
+static struct wg_peer *tcpwg_lookup_peer_by_endpoint(struct wg_device *wg,
+						     const struct endpoint *ep)
+{
+	struct wg_peer *peer, *found = NULL;
+
+	rcu_read_lock_bh();
+	list_for_each_entry_rcu(peer, &wg->peer_list, peer_list) {
+		read_lock_bh(&peer->endpoint_lock);
+		if (!READ_ONCE(peer->is_dead) &&
+		    tcpwg_endpoint_equal(&peer->endpoint, ep))
+			found = wg_peer_get_maybe_zero(peer);
+		read_unlock_bh(&peer->endpoint_lock);
+		if (found)
+			break;
+	}
+	rcu_read_unlock_bh();
+
+	return found;
+}
+
+static size_t tcpwg_skb_payload_len(const struct sk_buff *skb)
+{
 	const struct tcphdr *tcp = tcp_hdr(skb);
-	u32 seq = get_random_u32(), ack_seq = 0;
+	size_t ip_len, ip_hdr_len, tcp_hdr_len;
 
-	if (wg_socket_endpoint_from_skb(&endpoint, skb))
-		return;
-
-	if (flags & TCPWG_ACK)
-		ack_seq = ntohl(tcp->seq) + (tcp->syn ? 1 : 0);
-	if ((flags & TCPWG_SYN) && (flags & TCPWG_ACK)) {
-		if (endpoint.addr.sa_family == AF_INET)
-			seq = tcpwg_cookie_seq(endpoint.src4.s_addr,
-					       endpoint.addr4.sin_addr.s_addr,
-					       tcp->dest, tcp->source);
-#if IS_ENABLED(CONFIG_IPV6)
-		else if (endpoint.addr.sa_family == AF_INET6)
-			seq = tcpwg_cookie_seq6(&endpoint.src6,
-						&endpoint.addr6.sin6_addr,
-						tcp->dest, tcp->source);
-#endif
+	if (skb->protocol == htons(ETH_P_IP)) {
+		ip_hdr_len = ip_hdr(skb)->ihl * 4;
+		ip_len = ntohs(ip_hdr(skb)->tot_len);
+	} else if (IS_ENABLED(CONFIG_IPV6) &&
+		   skb->protocol == htons(ETH_P_IPV6)) {
+		ip_hdr_len = sizeof(struct ipv6hdr);
+		ip_len = ip_hdr_len + ntohs(ipv6_hdr(skb)->payload_len);
+	} else {
+		return 0;
 	}
 
-	tcpwg_send_empty(wg, &endpoint, flags, seq, ack_seq);
+	tcp_hdr_len = tcp->doff * 4;
+	if (unlikely(ip_len < ip_hdr_len + tcp_hdr_len))
+		return 0;
+
+	return ip_len - ip_hdr_len - tcp_hdr_len;
+}
+
+static int tcpwg_send_control_from_skb(struct wg_device *wg,
+				       const struct sk_buff *skb, u8 flags,
+				       u32 seq, u32 ack_seq)
+{
+	struct endpoint endpoint;
+	int ret;
+
+	if (wg_socket_endpoint_from_skb(&endpoint, skb))
+		return -EINVAL;
+
+	ret = tcpwg_send_empty(wg, &endpoint, flags, seq, ack_seq);
+	if (!ret) {
+		if ((flags & (TCPWG_SYN | TCPWG_ACK)) ==
+		    (TCPWG_SYN | TCPWG_ACK))
+			atomic64_inc(&tcpwg_fake_synack_sent);
+		else if (flags & TCPWG_SYN)
+			atomic64_inc(&tcpwg_fake_syn_sent);
+		else if (flags & TCPWG_ACK)
+			atomic64_inc(&tcpwg_fake_ack_sent);
+	}
+	return ret;
+}
+
+static void tcpwg_fake_reset_locked(struct wg_peer *peer,
+				    const struct endpoint *ep)
+{
+	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
+
+	state->state = TCPWG_FAKE_CLOSED;
+	state->local_isn = get_random_u32();
+	state->peer_isn = 0;
+	state->tx_seq = state->local_isn;
+	state->rx_seq = 0;
+	state->last_syn_sent = 0;
+	state->last_seen = jiffies;
+	state->tuple = *ep;
+	state->tuple_valid = true;
+	atomic64_inc(&tcpwg_fake_endpoint_reset);
+}
+
+static void tcpwg_fake_schedule_drain(struct wg_peer *peer)
+{
+	wg_peer_get(peer);
+	if (!queue_work(system_wq, &peer->fake_tcp.drain_work))
+		wg_peer_put(peer);
+}
+
+static bool tcpwg_fake_accept_data(struct wg_peer *peer,
+				   const struct endpoint *endpoint,
+				   const struct tcphdr *tcp,
+				   size_t payload_len)
+{
+	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
+	u32 end_seq;
+	bool accept = false;
+
+	if (!tcp->ack || tcp->syn || !payload_len)
+		return false;
+
+	spin_lock_bh(&state->lock);
+	if (state->state != TCPWG_FAKE_ESTABLISHED ||
+	    !state->tuple_valid ||
+	    !tcpwg_endpoint_equal(&state->tuple, endpoint))
+		goto out;
+
+	end_seq = ntohl(tcp->seq) + payload_len;
+	state->last_seen = jiffies;
+	if (after(end_seq, state->rx_seq) || !state->rx_seq)
+		state->rx_seq = end_seq;
+	accept = true;
+out:
+	spin_unlock_bh(&state->lock);
+	return accept;
+}
+
+static bool tcpwg_fake_handle_control(struct wg_device *wg, struct sk_buff *skb,
+				      const struct endpoint *endpoint,
+				      const struct tcphdr *tcp,
+				      size_t payload_len,
+				      struct wg_peer *peer)
+{
+	struct tcpwg_fake_tcp *state;
+	u32 seq = ntohl(tcp->seq), ack_seq = ntohl(tcp->ack_seq);
+	u32 local_isn = 0, tx_seq = 0, rx_seq = 0;
+	bool send_ack = false, established = false;
+
+	if (tcp->syn && !tcp->ack) {
+		if (!peer)
+			return true;
+
+		state = &peer->fake_tcp;
+		spin_lock_bh(&state->lock);
+		state->state = TCPWG_FAKE_SYN_RECV;
+		state->local_isn = get_random_u32();
+		state->peer_isn = seq;
+		state->tx_seq = state->local_isn + 1;
+		state->rx_seq = seq + 1;
+		state->last_syn_sent = 0;
+		state->last_seen = jiffies;
+		state->tuple = *endpoint;
+		state->tuple_valid = true;
+		local_isn = state->local_isn;
+		spin_unlock_bh(&state->lock);
+
+		tcpwg_send_control_from_skb(wg, skb, TCPWG_SYN | TCPWG_ACK,
+					    local_isn, seq + 1);
+		return true;
+	}
+
+	if (tcp->syn && tcp->ack) {
+		if (!peer)
+			return true;
+		state = &peer->fake_tcp;
+		spin_lock_bh(&state->lock);
+		if (state->state == TCPWG_FAKE_SYN_SENT &&
+		    state->tuple_valid &&
+		    tcpwg_endpoint_equal(&state->tuple, endpoint) &&
+		    ack_seq == state->local_isn + 1) {
+			state->peer_isn = seq;
+			state->rx_seq = seq + 1;
+			state->tx_seq = state->local_isn + 1;
+			state->state = TCPWG_FAKE_ESTABLISHED;
+			state->last_seen = jiffies;
+			tx_seq = state->tx_seq;
+			rx_seq = state->rx_seq;
+			send_ack = true;
+			established = true;
+		}
+		spin_unlock_bh(&state->lock);
+		if (send_ack)
+			tcpwg_send_control_from_skb(wg, skb, TCPWG_ACK,
+						    tx_seq, rx_seq);
+		if (established) {
+			atomic64_inc(&tcpwg_fake_established);
+			tcpwg_fake_schedule_drain(peer);
+		}
+		return true;
+	}
+
+	if (tcp->ack && !payload_len) {
+		if (!peer)
+			return true;
+		state = &peer->fake_tcp;
+		spin_lock_bh(&state->lock);
+		if (state->state == TCPWG_FAKE_SYN_RECV &&
+		    state->tuple_valid &&
+		    tcpwg_endpoint_equal(&state->tuple, endpoint) &&
+		    seq == state->rx_seq &&
+		    ack_seq == state->local_isn + 1) {
+			state->tx_seq = state->local_isn + 1;
+			state->state = TCPWG_FAKE_ESTABLISHED;
+			state->last_seen = jiffies;
+			established = true;
+		}
+		spin_unlock_bh(&state->lock);
+		if (established) {
+			atomic64_inc(&tcpwg_fake_established);
+			tcpwg_fake_schedule_drain(peer);
+		}
+		return true;
+	}
+
+	return false;
 }
 
 static unsigned int tcpwg_consume_packet(struct wg_device *wg,
@@ -284,15 +467,24 @@ static unsigned int tcpwg_consume_packet(struct wg_device *wg,
 					 const struct tcphdr *tcp,
 					 size_t payload_len)
 {
+	struct endpoint endpoint;
+	struct wg_peer *peer = NULL;
+
+	if (wg_socket_endpoint_from_skb(&endpoint, skb))
+		goto drop;
+	peer = tcpwg_lookup_peer_by_endpoint(wg, &endpoint);
+
 	if (tcp->rst)
 		goto drop;
 
-	if (tcp->syn && !tcp->ack) {
-		tcpwg_send_control_from_skb(wg, skb, TCPWG_SYN | TCPWG_ACK);
+	if (tcpwg_fake_handle_control(wg, skb, &endpoint, tcp, payload_len,
+				      peer))
 		goto drop;
-	}
 
 	if (!payload_len)
+		goto drop;
+
+	if (!peer || !tcpwg_fake_accept_data(peer, &endpoint, tcp, payload_len))
 		goto drop;
 
 	skb = skb_share_check(skb, GFP_ATOMIC);
@@ -302,12 +494,14 @@ static unsigned int tcpwg_consume_packet(struct wg_device *wg,
 	skb_mark_not_on_list(skb);
 	wg_packet_receive(wg, skb);
 	dev_put(wg->dev);
+	wg_peer_put(peer);
 	return NF_STOLEN;
 
 drop:
 	kfree_skb(skb);
 stolen:
 	dev_put(wg->dev);
+	wg_peer_put(peer);
 	return NF_STOLEN;
 }
 
@@ -705,49 +899,135 @@ static int tcpwg_send_empty(struct wg_device *wg, struct endpoint *endpoint,
 	return -EAFNOSUPPORT;
 }
 
+static bool tcpwg_fake_prepare_data(struct wg_peer *peer, struct endpoint *ep,
+				    struct sk_buff *skb, u32 *seq, u32 *ack)
+{
+	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
+	bool send_syn = false;
+	u32 syn_seq = 0;
+	int ret;
+
+	spin_lock_bh(&state->lock);
+	if (!state->tuple_valid || !tcpwg_endpoint_equal(&state->tuple, ep)) {
+		skb_queue_purge(&state->pending_tx);
+		tcpwg_fake_reset_locked(peer, ep);
+	}
+
+	if (state->state == TCPWG_FAKE_ESTABLISHED) {
+		*seq = state->tx_seq;
+		*ack = state->rx_seq;
+		state->tx_seq += max_t(u32, 1U, skb->len);
+		state->last_seen = jiffies;
+		spin_unlock_bh(&state->lock);
+		return true;
+	}
+
+	if (skb_queue_len(&state->pending_tx) >= TCPWG_FAKE_PENDING_MAX) {
+		atomic64_inc(&tcpwg_fake_pending_dropped);
+		spin_unlock_bh(&state->lock);
+		dev_kfree_skb(skb);
+		return false;
+	}
+
+	skb_queue_tail(&state->pending_tx, skb);
+	atomic64_inc(&tcpwg_fake_pending_queued);
+	if (!state->last_syn_sent ||
+	    time_after(jiffies, state->last_syn_sent + HZ)) {
+		state->last_syn_sent = jiffies;
+		state->state = TCPWG_FAKE_SYN_SENT;
+		syn_seq = state->local_isn;
+		send_syn = true;
+	}
+	spin_unlock_bh(&state->lock);
+
+	if (send_syn) {
+		ret = tcpwg_send_empty(peer->device, ep, TCPWG_SYN, syn_seq, 0);
+		if (!ret)
+			atomic64_inc(&tcpwg_fake_syn_sent);
+	}
+	return false;
+}
+
+void tcpwg_drain_pending_work(struct work_struct *work)
+{
+	struct wg_peer *peer = container_of(work, struct wg_peer,
+					    fake_tcp.drain_work);
+	struct sk_buff *skb;
+	size_t skb_len;
+	u32 seq, ack;
+	int ret;
+
+	while ((skb = skb_dequeue(&peer->fake_tcp.pending_tx)) != NULL) {
+		skb_len = skb->len;
+		read_lock_bh(&peer->endpoint_lock);
+		spin_lock_bh(&peer->fake_tcp.lock);
+		if (peer->fake_tcp.state != TCPWG_FAKE_ESTABLISHED ||
+		    !peer->fake_tcp.tuple_valid ||
+		    !tcpwg_endpoint_equal(&peer->fake_tcp.tuple,
+					  &peer->endpoint)) {
+			spin_unlock_bh(&peer->fake_tcp.lock);
+			read_unlock_bh(&peer->endpoint_lock);
+			dev_kfree_skb(skb);
+			continue;
+		}
+		seq = peer->fake_tcp.tx_seq;
+		ack = peer->fake_tcp.rx_seq;
+		peer->fake_tcp.tx_seq += max_t(u32, 1U, skb_len);
+		spin_unlock_bh(&peer->fake_tcp.lock);
+
+		if (peer->endpoint.addr.sa_family == AF_INET)
+			ret = send4(peer->device, skb, &peer->endpoint, 0,
+				    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
+				    seq, ack);
+		else if (peer->endpoint.addr.sa_family == AF_INET6)
+			ret = send6(peer->device, skb, &peer->endpoint, 0,
+				    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
+				    seq, ack);
+		else {
+			dev_kfree_skb(skb);
+			ret = -EAFNOSUPPORT;
+		}
+		if (likely(!ret))
+			peer->tx_bytes += skb_len;
+		read_unlock_bh(&peer->endpoint_lock);
+	}
+
+	wg_peer_put(peer);
+}
+
 int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb, u8 ds)
 {
 	size_t skb_len = skb->len;
+	u32 seq, ack_seq;
 	int ret = -EAFNOSUPPORT;
 
 	read_lock_bh(&peer->endpoint_lock);
-	if (peer->endpoint.addr.sa_family == AF_INET)
+	if (peer->endpoint.addr.sa_family == AF_INET) {
+		if (!tcpwg_fake_prepare_data(peer, &peer->endpoint, skb,
+					     &seq, &ack_seq)) {
+			read_unlock_bh(&peer->endpoint_lock);
+			return 0;
+		}
 		ret = send4(peer->device, skb, &peer->endpoint, ds,
 			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
-			    get_random_u32(), get_random_u32());
-	else if (peer->endpoint.addr.sa_family == AF_INET6)
+			    seq, ack_seq);
+	} else if (peer->endpoint.addr.sa_family == AF_INET6) {
+		if (!tcpwg_fake_prepare_data(peer, &peer->endpoint, skb,
+					     &seq, &ack_seq)) {
+			read_unlock_bh(&peer->endpoint_lock);
+			return 0;
+		}
 		ret = send6(peer->device, skb, &peer->endpoint, ds,
 			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
-			    get_random_u32(), get_random_u32());
-	else
+			    seq, ack_seq);
+	} else {
 		dev_kfree_skb(skb);
+	}
 	if (likely(!ret))
 		peer->tx_bytes += skb_len;
 	read_unlock_bh(&peer->endpoint_lock);
 
 	return ret;
-}
-
-static void tcpwg_next_data_seq(struct wg_peer *peer, size_t len, u32 *seq,
-				u32 *ack_seq)
-{
-	struct {
-		u32 seq;
-		u32 ack_seq;
-	} seed;
-	u32 advance = max_t(u32, 1U, len);
-
-	if (unlikely(!peer->tcpwg_tx_seq_valid)) {
-		get_random_bytes(&seed, sizeof(seed));
-		peer->tcpwg_tx_seq = seed.seq;
-		peer->tcpwg_tx_ack_seq = seed.ack_seq;
-		peer->tcpwg_tx_seq_valid = true;
-	}
-
-	*seq = peer->tcpwg_tx_seq;
-	*ack_seq = peer->tcpwg_tx_ack_seq;
-	peer->tcpwg_tx_seq += advance;
-	peer->tcpwg_tx_ack_seq++;
 }
 
 int wg_socket_send_data_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,
@@ -759,12 +1039,20 @@ int wg_socket_send_data_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,
 
 	read_lock_bh(&peer->endpoint_lock);
 	if (peer->endpoint.addr.sa_family == AF_INET) {
-		tcpwg_next_data_seq(peer, skb_len, &seq, &ack_seq);
+		if (!tcpwg_fake_prepare_data(peer, &peer->endpoint, skb,
+					     &seq, &ack_seq)) {
+			read_unlock_bh(&peer->endpoint_lock);
+			return 0;
+		}
 		ret = send4(peer->device, skb, &peer->endpoint, ds,
 			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
 			    seq, ack_seq);
 	} else if (peer->endpoint.addr.sa_family == AF_INET6) {
-		tcpwg_next_data_seq(peer, skb_len, &seq, &ack_seq);
+		if (!tcpwg_fake_prepare_data(peer, &peer->endpoint, skb,
+					     &seq, &ack_seq)) {
+			read_unlock_bh(&peer->endpoint_lock);
+			return 0;
+		}
 		ret = send6(peer->device, skb, &peer->endpoint, ds,
 			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
 			    seq, ack_seq);
@@ -802,6 +1090,11 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 	int ret = 0;
 	struct sk_buff *skb;
 	struct endpoint endpoint;
+	const struct tcphdr *tcp;
+	struct wg_peer *peer = NULL;
+	struct tcpwg_fake_tcp *state;
+	size_t payload_len;
+	u32 seq, ack_seq;
 	void* junk;
 
 	if (unlikely(!in_skb))
@@ -809,6 +1102,10 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 	ret = wg_socket_endpoint_from_skb(&endpoint, in_skb);
 	if (unlikely(ret < 0))
 		return ret;
+	tcp = tcp_hdr(in_skb);
+	payload_len = tcpwg_skb_payload_len(in_skb);
+	seq = ntohl(tcp->ack_seq);
+	ack_seq = ntohl(tcp->seq) + (tcp->syn ? 1 : 0) + payload_len;
 
 	skb = alloc_skb(len + junk_size + SKB_HEADER_LEN, GFP_ATOMIC);
 	if (unlikely(!skb))
@@ -819,18 +1116,32 @@ int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
 	get_random_bytes(junk, junk_size);
 	skb_put_data(skb, buffer, len);
 
+	peer = tcpwg_lookup_peer_by_endpoint(wg, &endpoint);
+	if (peer) {
+		state = &peer->fake_tcp;
+		spin_lock_bh(&state->lock);
+		if (state->state == TCPWG_FAKE_ESTABLISHED &&
+		    state->tuple_valid &&
+		    tcpwg_endpoint_equal(&state->tuple, &endpoint)) {
+			seq = state->tx_seq;
+			ack_seq = state->rx_seq;
+			state->tx_seq += max_t(u32, 1U, skb->len);
+			state->last_seen = jiffies;
+		}
+		spin_unlock_bh(&state->lock);
+	}
+
 	if (endpoint.addr.sa_family == AF_INET)
 		ret = send4(wg, skb, &endpoint, 0, NULL,
-			    TCPWG_ACK | TCPWG_PSH, get_random_u32(),
-			    get_random_u32());
+			    TCPWG_ACK | TCPWG_PSH, seq, ack_seq);
 	else if (endpoint.addr.sa_family == AF_INET6)
 		ret = send6(wg, skb, &endpoint, 0, NULL,
-			    TCPWG_ACK | TCPWG_PSH, get_random_u32(),
-			    get_random_u32());
+			    TCPWG_ACK | TCPWG_PSH, seq, ack_seq);
 	/* No other possibilities if the endpoint is valid, which it is,
 	 * as we checked above.
 	 */
 
+	wg_peer_put(peer);
 	return ret;
 }
 
@@ -876,9 +1187,12 @@ static bool endpoint_eq(const struct endpoint *a, const struct endpoint *b)
 	       unlikely(!a->addr.sa_family && !b->addr.sa_family);
 }
 
-void wg_socket_set_peer_endpoint(struct wg_peer *peer,
-				 const struct endpoint *endpoint)
+static void wg_socket_set_peer_endpoint_sync(struct wg_peer *peer,
+					     const struct endpoint *endpoint)
 {
+	struct tcpwg_fake_tcp *state = &peer->fake_tcp;
+	bool same_remote;
+
 	/* First we check unlocked, in order to optimize, since it's pretty rare
 	 * that an endpoint will change. If we happen to be mid-write, and two
 	 * CPUs wind up writing the same thing or something slightly different,
@@ -886,6 +1200,8 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 	 */
 	if (endpoint_eq(endpoint, &peer->endpoint))
 		return;
+
+	same_remote = tcpwg_endpoint_equal(endpoint, &peer->endpoint);
 	write_lock_bh(&peer->endpoint_lock);
 	if (endpoint->addr.sa_family == AF_INET) {
 		peer->endpoint.addr4 = endpoint->addr4;
@@ -897,10 +1213,27 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 	} else {
 		goto out;
 	}
-	peer->tcpwg_tx_seq_valid = false;
+	if (!same_remote) {
+		spin_lock_bh(&state->lock);
+		skb_queue_purge(&state->pending_tx);
+		tcpwg_fake_reset_locked(peer, endpoint);
+		spin_unlock_bh(&state->lock);
+	}
 	dst_cache_reset(&peer->endpoint_cache);
 out:
 	write_unlock_bh(&peer->endpoint_lock);
+}
+
+void wg_socket_set_peer_endpoint(struct wg_peer *peer,
+				 const struct endpoint *endpoint)
+{
+	wg_socket_set_peer_endpoint_sync(peer, endpoint);
+}
+
+void wg_socket_set_peer_endpoint_from_rx(struct wg_peer *peer,
+					 const struct endpoint *endpoint)
+{
+	wg_socket_set_peer_endpoint_sync(peer, endpoint);
 }
 
 void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
@@ -909,14 +1242,22 @@ void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
 	struct endpoint endpoint;
 
 	if (!wg_socket_endpoint_from_skb(&endpoint, skb))
-		wg_socket_set_peer_endpoint(peer, &endpoint);
+		wg_socket_set_peer_endpoint_from_rx(peer, &endpoint);
 }
 
 void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer)
 {
 	write_lock_bh(&peer->endpoint_lock);
 	memset(&peer->endpoint.src6, 0, sizeof(peer->endpoint.src6));
-	peer->tcpwg_tx_seq_valid = false;
+	spin_lock_bh(&peer->fake_tcp.lock);
+	skb_queue_purge(&peer->fake_tcp.pending_tx);
+	peer->fake_tcp.state = TCPWG_FAKE_CLOSED;
+	peer->fake_tcp.tuple_valid = false;
+	peer->fake_tcp.local_isn = get_random_u32();
+	peer->fake_tcp.tx_seq = peer->fake_tcp.local_isn;
+	peer->fake_tcp.rx_seq = 0;
+	peer->fake_tcp.last_syn_sent = 0;
+	spin_unlock_bh(&peer->fake_tcp.lock);
 	dst_cache_reset_now(&peer->endpoint_cache);
 	write_unlock_bh(&peer->endpoint_lock);
 }
