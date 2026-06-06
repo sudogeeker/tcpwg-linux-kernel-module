@@ -21,7 +21,6 @@
 #include <linux/icmp.h>
 #include <linux/suspend.h>
 #include <net/dst_metadata.h>
-#include <net/gso.h>
 #include <net/icmp.h>
 #include <net/rtnetlink.h>
 #include <net/ip_tunnels.h>
@@ -148,7 +147,6 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct wg_device *wg = netdev_priv(dev);
 	struct sk_buff_head packets;
 	struct wg_peer *peer;
-	struct sk_buff *next;
 	sa_family_t family;
 	u32 mtu;
 	int ret;
@@ -182,33 +180,15 @@ static netdev_tx_t wg_xmit(struct sk_buff *skb, struct net_device *dev)
 	mtu = skb_valid_dst(skb) ? dst_mtu(skb_dst(skb)) : dev->mtu;
 
 	__skb_queue_head_init(&packets);
-	if (!skb_is_gso(skb)) {
-		skb_mark_not_on_list(skb);
-	} else {
-		struct sk_buff *segs = skb_gso_segment(skb, 0);
-
-		if (IS_ERR(segs)) {
-			ret = PTR_ERR(segs);
-			goto err_peer;
-		}
-		dev_kfree_skb(skb);
-		skb = segs;
-	}
-
-	skb_list_walk_safe(skb, skb, next) {
-		skb_mark_not_on_list(skb);
-
-		skb = skb_share_check(skb, GFP_ATOMIC);
-		if (unlikely(!skb))
-			continue;
-
+	skb_mark_not_on_list(skb);
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (likely(skb)) {
 		/* We only need to keep the original dst around for icmp,
 		 * so at this point we're in a position to drop it.
 		 */
 		skb_dst_drop(skb);
 
 		PACKET_CB(skb)->mtu = mtu;
-
 		__skb_queue_tail(&packets, skb);
 	}
 

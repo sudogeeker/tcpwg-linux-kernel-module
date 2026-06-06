@@ -23,6 +23,7 @@
 #include <net/ip_tunnels.h>
 #include <net/udp.h>
 #include <net/sock.h>
+#include <net/gso.h>
 
 static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 {
@@ -412,6 +413,46 @@ void wg_packet_purge_staged_packets(struct wg_peer *peer)
 	spin_unlock_bh(&peer->staged_packet_queue.lock);
 }
 
+static void wg_packet_segment_staged_packets(struct wg_peer *peer,
+					     struct sk_buff_head *packets)
+{
+	struct sk_buff_head segments;
+	struct sk_buff *skb, *segs, *seg, *next;
+	u32 mtu;
+
+	__skb_queue_head_init(&segments);
+	while ((skb = __skb_dequeue(packets)) != NULL) {
+		if (!skb_is_gso(skb)) {
+			__skb_queue_tail(&segments, skb);
+			continue;
+		}
+
+		mtu = PACKET_CB(skb)->mtu;
+		segs = skb_gso_segment(skb, 0);
+		if (unlikely(IS_ERR_OR_NULL(segs))) {
+			net_dbg_ratelimited("%s: Unable to segment GSO packet for peer %llu, dropping packet\n",
+					    peer->device->dev->name,
+					    peer->internal_id);
+			dev_kfree_skb(skb);
+			DEV_STATS_INC(peer->device->dev, tx_dropped);
+			continue;
+		}
+
+		dev_kfree_skb(skb);
+		skb_list_walk_safe(segs, seg, next) {
+			skb_mark_not_on_list(seg);
+			seg = skb_share_check(seg, GFP_ATOMIC);
+			if (unlikely(!seg)) {
+				DEV_STATS_INC(peer->device->dev, tx_dropped);
+				continue;
+			}
+			PACKET_CB(seg)->mtu = mtu;
+			__skb_queue_tail(&segments, seg);
+		}
+	}
+	skb_queue_splice_tail(&segments, packets);
+}
+
 void wg_packet_send_staged_packets(struct wg_peer *peer)
 {
 	struct noise_keypair *keypair;
@@ -438,6 +479,12 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 	if (unlikely(wg_birthdate_has_expired(keypair->sending.birthdate,
 					      REJECT_AFTER_TIME)))
 		goto out_invalid;
+
+	wg_packet_segment_staged_packets(peer, &packets);
+	if (unlikely(skb_queue_empty(&packets))) {
+		wg_noise_keypair_put(keypair, false);
+		return;
+	}
 
 	/* After we know we have a somewhat valid key, we now try to assign
 	 * nonces to all of the packets in the queue. If we can't assign nonces
