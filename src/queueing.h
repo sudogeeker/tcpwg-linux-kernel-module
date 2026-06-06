@@ -208,6 +208,32 @@ static inline void wg_queue_enqueue_per_peer_rx(struct sk_buff *skb, enum packet
 	wg_peer_put(peer);
 }
 
+static inline struct wg_peer *
+wg_queue_enqueue_per_peer_rx_batch(struct sk_buff *skb, enum packet_state state,
+				   struct wg_peer *scheduled_peer)
+{
+	struct wg_peer *peer = PACKET_PEER(skb);
+
+	if (peer != scheduled_peer) {
+		if (scheduled_peer) {
+			napi_schedule(&scheduled_peer->napi);
+			wg_peer_put(scheduled_peer);
+		}
+		scheduled_peer = wg_peer_get(peer);
+	}
+
+	atomic_set_release(&PACKET_CB(skb)->state, state);
+	return scheduled_peer;
+}
+
+static inline void wg_queue_flush_peer_rx_batch(struct wg_peer *scheduled_peer)
+{
+	if (scheduled_peer) {
+		napi_schedule(&scheduled_peer->napi);
+		wg_peer_put(scheduled_peer);
+	}
+}
+
 #ifdef DEBUG
 bool wg_packet_counter_selftest(void);
 #endif

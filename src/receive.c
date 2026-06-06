@@ -20,6 +20,8 @@
 #include <linux/tcp.h>
 #include <net/ip_tunnels.h>
 
+#define WG_RX_DECRYPT_BATCH_SIZE 64
+
 /* Must be called with bh disabled. */
 static void update_rx_stats(struct wg_peer *peer, size_t len)
 {
@@ -556,6 +558,8 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 	struct crypt_queue *queue = container_of(work, struct multicore_worker,
 						 work)->ptr;
 	struct sk_buff *skb;
+	struct wg_peer *scheduled_peer = NULL;
+	unsigned int scheduled_count = 0;
 #ifdef COMPAT_CRYPTO_IS_ZINC
 	simd_context_t simd_context;
 	simd_get(&simd_context);
@@ -565,13 +569,24 @@ void wg_packet_decrypt_worker(struct work_struct *work)
 			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair
 					      COMPAT_MAYBE_SIMD_CONTEXT(&simd_context))) ?
 				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
-		wg_queue_enqueue_per_peer_rx(skb, state);
+		scheduled_peer = wg_queue_enqueue_per_peer_rx_batch(skb, state,
+								    scheduled_peer);
+		if (++scheduled_count >= WG_RX_DECRYPT_BATCH_SIZE) {
+			wg_queue_flush_peer_rx_batch(scheduled_peer);
+			scheduled_peer = NULL;
+			scheduled_count = 0;
+		}
 #ifdef COMPAT_CRYPTO_IS_ZINC
 		simd_relax(&simd_context);
 #endif
-		if (need_resched())
+		if (need_resched()) {
+			wg_queue_flush_peer_rx_batch(scheduled_peer);
+			scheduled_peer = NULL;
+			scheduled_count = 0;
 			cond_resched();
+		}
 	}
+	wg_queue_flush_peer_rx_batch(scheduled_peer);
 
 #ifdef COMPAT_CRYPTO_IS_ZINC
 	simd_put(&simd_context);
