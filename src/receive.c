@@ -27,44 +27,62 @@ static void update_rx_stats(struct wg_peer *peer, size_t len)
 	peer->rx_bytes += len;
 }
 
+static bool tcpwg_validate_message_at(struct sk_buff *skb, size_t offset,
+				      struct magic_header *header)
+{
+	__le32 type;
+
+	if (unlikely(offset > skb->len ||
+		     skb->len - offset < sizeof(struct message_header)))
+		return false;
+	if (unlikely(skb_copy_bits(skb, offset, &type, sizeof(type))))
+		return false;
+	return mh_validate(type, header);
+}
+
+static bool tcpwg_pull_message_at(struct sk_buff *skb, struct wg_device *wg,
+				  size_t offset, struct magic_header *header)
+{
+	if (!tcpwg_validate_message_at(skb, offset, header))
+		return false;
+	if (unlikely(!pskb_may_pull(skb, offset +
+					 sizeof(struct message_header)))) {
+		net_dbg_skb_ratelimited("%s: sk_buff from %pISpfsc could not pull TCP-WG header, dropping packet\n",
+					wg->dev->name, skb);
+		return false;
+	}
+	skb_pull(skb, offset);
+	return true;
+}
+
 static size_t prepare_tcp_wg_message(struct sk_buff *skb, struct wg_device *wg)
 {
-	if (skb_is_nonlinear(skb) && unlikely(skb_linearize(skb))) {
-		net_dbg_skb_ratelimited("%s: non-linear sk_buff from %pISpfsc could not be linearized, dropping packet\n",
-								wg->dev->name, skb);
-		return 0;
-	}
-	
 	if (skb->len == wg->junk_size[MSGIDX_HANDSHAKE_INIT] + MESSAGE_INITIATION_SIZE) {
-		skb_pull(skb, wg->junk_size[MSGIDX_HANDSHAKE_INIT]);
-		if (mh_validate(SKB_TYPE_LE32(skb), &wg->headers[MSGIDX_HANDSHAKE_INIT]))
+		if (tcpwg_pull_message_at(skb, wg,
+					  wg->junk_size[MSGIDX_HANDSHAKE_INIT],
+					  &wg->headers[MSGIDX_HANDSHAKE_INIT]))
 			return MESSAGE_INITIATION_SIZE;
-		else
-			skb_push(skb, wg->junk_size[MSGIDX_HANDSHAKE_INIT]);
 	}
 
 	if (skb->len == wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE] + MESSAGE_RESPONSE_SIZE) {
-		skb_pull(skb, wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE]);
-		if (mh_validate(SKB_TYPE_LE32(skb), &wg->headers[MSGIDX_HANDSHAKE_RESPONSE]))
+		if (tcpwg_pull_message_at(skb, wg,
+					  wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE],
+					  &wg->headers[MSGIDX_HANDSHAKE_RESPONSE]))
 			return MESSAGE_RESPONSE_SIZE;
-		else
-			skb_push(skb, wg->junk_size[MSGIDX_HANDSHAKE_RESPONSE]);
 	}
 
 	if (skb->len == wg->junk_size[MSGIDX_HANDSHAKE_COOKIE] + MESSAGE_COOKIE_REPLY_SIZE) {
-		skb_pull(skb, wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
-		if (mh_validate(SKB_TYPE_LE32(skb), &wg->headers[MSGIDX_HANDSHAKE_COOKIE]))
+		if (tcpwg_pull_message_at(skb, wg,
+					  wg->junk_size[MSGIDX_HANDSHAKE_COOKIE],
+					  &wg->headers[MSGIDX_HANDSHAKE_COOKIE]))
 			return MESSAGE_COOKIE_REPLY_SIZE;
-		else
-			skb_push(skb, wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
 	}
 
 	if (skb->len >= wg->junk_size[MSGIDX_TRANSPORT] + MESSAGE_TRANSPORT_SIZE) {
-		skb_pull(skb, wg->junk_size[MSGIDX_TRANSPORT]);
-		if (mh_validate(SKB_TYPE_LE32(skb), &wg->headers[MSGIDX_TRANSPORT]))
+		if (tcpwg_pull_message_at(skb, wg,
+					  wg->junk_size[MSGIDX_TRANSPORT],
+					  &wg->headers[MSGIDX_TRANSPORT]))
 			return MESSAGE_TRANSPORT_SIZE;
-		else
-			skb_push(skb, wg->junk_size[MSGIDX_TRANSPORT]);
 	}
 
 	net_dbg_skb_ratelimited("%s: Unknown message from %pISpfsc encountered, packet dropped\n",
