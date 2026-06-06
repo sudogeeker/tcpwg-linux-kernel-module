@@ -51,8 +51,8 @@ struct wg_peer *wg_peer_create(struct wg_device *wg,
 	peer->fake_tcp.state = TCPWG_FAKE_CLOSED;
 	peer->fake_tcp.local_isn = get_random_u32();
 	peer->fake_tcp.tx_seq = peer->fake_tcp.local_isn;
-	skb_queue_head_init(&peer->fake_tcp.pending_tx);
-	INIT_WORK(&peer->fake_tcp.drain_work, tcpwg_drain_pending_work);
+	INIT_DELAYED_WORK(&peer->fake_tcp.maintenance_work,
+			  tcpwg_fake_maintenance_work);
 	INIT_WORK(&peer->transmit_handshake_work, wg_packet_handshake_send_worker);
 	INIT_WORK(&peer->transmit_packet_work, wg_packet_tx_worker);
 	wg_prev_queue_init(&peer->tx_queue);
@@ -139,8 +139,7 @@ static void peer_remove_after_dead(struct wg_peer *peer)
 	 * clear_peer_work) no longer are in use.
 	 */
 	flush_workqueue(peer->device->handshake_send_wq);
-	cancel_work_sync(&peer->fake_tcp.drain_work);
-	skb_queue_purge(&peer->fake_tcp.pending_tx);
+	cancel_delayed_work_sync(&peer->fake_tcp.maintenance_work);
 
 	/* After the above flushes, a peer might still be active in a few
 	 * different contexts: 1) from xmit(), before hitting is_dead and
@@ -229,8 +228,7 @@ static void kref_release(struct kref *refcount)
 	 * transmitted.
 	 */
 	wg_packet_purge_staged_packets(peer);
-	cancel_work_sync(&peer->fake_tcp.drain_work);
-	skb_queue_purge(&peer->fake_tcp.pending_tx);
+	cancel_delayed_work_sync(&peer->fake_tcp.maintenance_work);
 
 	/* Free the memory used. */
 	call_rcu(&peer->rcu, rcu_release);

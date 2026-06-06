@@ -16,7 +16,7 @@ void wg_socket_reinit(struct wg_device *wg, struct sock *new4,
 		      struct sock *new6);
 int wg_socket_tcp_init(void);
 void wg_socket_tcp_uninit(void);
-void tcpwg_drain_pending_work(struct work_struct *work);
+void tcpwg_fake_maintenance_work(struct work_struct *work);
 int wg_socket_send_buffer_to_peer(struct wg_peer *peer, void *data,
 				  size_t len, u8 ds, size_t junk_size);
 int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,

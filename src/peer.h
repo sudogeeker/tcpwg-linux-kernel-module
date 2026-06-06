@@ -39,8 +39,10 @@ struct endpoint {
 enum tcpwg_fake_state {
 	TCPWG_FAKE_CLOSED = 0,
 	TCPWG_FAKE_SYN_SENT,
-	TCPWG_FAKE_SYN_RECV,
+	TCPWG_FAKE_SYN_RECEIVED,
 	TCPWG_FAKE_ESTABLISHED,
+	TCPWG_FAKE_FIN_WAIT,
+	TCPWG_FAKE_CLOSE_WAIT,
 };
 
 struct tcpwg_fake_tcp {
@@ -52,14 +54,15 @@ struct tcpwg_fake_tcp {
 	u32 tx_seq;
 	u32 rx_seq;
 
-	unsigned long last_syn_sent;
+	unsigned long state_since;
 	unsigned long last_seen;
+	unsigned long last_data;
+	unsigned long last_keepalive_sent;
 
 	struct endpoint tuple;
 	bool tuple_valid;
 
-	struct sk_buff_head pending_tx;
-	struct work_struct drain_work;
+	struct delayed_work maintenance_work;
 };
 
 struct wg_peer {
