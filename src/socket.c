@@ -88,11 +88,68 @@ static void tcpwg_fill_header(struct tcphdr *tcp, __be16 source, __be16 dest,
 	tcp->psh = !!(flags & TCPWG_PSH);
 }
 
-static void tcpwg_set_v4_csum(struct sk_buff *skb, __be32 src, __be32 dst)
+static bool tcpwg_dev_can_checksum(const struct net_device *dev, bool ipv6)
+{
+	if (!dev)
+		return false;
+	if (dev->features & NETIF_F_HW_CSUM)
+		return true;
+#ifdef NETIF_F_IP_CSUM
+	if (!ipv6 && (dev->features & NETIF_F_IP_CSUM))
+		return true;
+#endif
+#ifdef NETIF_F_V4_CSUM
+	if (!ipv6 && (dev->features & NETIF_F_V4_CSUM))
+		return true;
+#endif
+#ifdef NETIF_F_IPV6_CSUM
+	if (ipv6 && (dev->features & NETIF_F_IPV6_CSUM))
+		return true;
+#endif
+	return false;
+}
+
+static bool tcpwg_try_partial_csum(struct sk_buff *skb,
+				   const struct net_device *dev,
+				   __sum16 pseudo_header, bool ipv6)
+{
+	struct tcphdr *tcp = tcp_hdr(skb);
+	unsigned int csum_start;
+
+	if (unlikely(skb->ip_summed == CHECKSUM_PARTIAL))
+		return false;
+	if (!tcpwg_dev_can_checksum(dev, ipv6))
+		return false;
+	if (skb_is_nonlinear(skb) && !(dev->features & NETIF_F_SG))
+		return false;
+	if (unlikely(skb_transport_header(skb) < skb->head ||
+		     skb_transport_header(skb) + sizeof(*tcp) >
+			     skb_tail_pointer(skb)))
+		return false;
+
+	csum_start = skb_transport_header(skb) - skb->head;
+	if (unlikely(csum_start > U16_MAX))
+		return false;
+
+	tcp->check = pseudo_header;
+	skb->ip_summed = CHECKSUM_PARTIAL;
+	skb->csum_start = csum_start;
+	skb->csum_offset = offsetof(struct tcphdr, check);
+	return true;
+}
+
+static void tcpwg_set_v4_csum(struct sk_buff *skb,
+			      const struct net_device *dev, __be32 src,
+			      __be32 dst)
 {
 	struct tcphdr *tcp = tcp_hdr(skb);
 
 	tcp->check = 0;
+	if (tcpwg_try_partial_csum(skb, dev,
+				   ~csum_tcpudp_magic(src, dst, skb->len,
+						      IPPROTO_TCP, 0), false))
+		return;
+
 	tcp->check = csum_tcpudp_magic(src, dst, skb->len, IPPROTO_TCP,
 				       skb_checksum(skb, 0, skb->len, 0));
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -100,11 +157,17 @@ static void tcpwg_set_v4_csum(struct sk_buff *skb, __be32 src, __be32 dst)
 
 #if IS_ENABLED(CONFIG_IPV6)
 static void tcpwg_set_v6_csum(struct sk_buff *skb, const struct in6_addr *src,
-			      const struct in6_addr *dst)
+			      const struct in6_addr *dst,
+			      const struct net_device *dev)
 {
 	struct tcphdr *tcp = tcp_hdr(skb);
 
 	tcp->check = 0;
+	if (tcpwg_try_partial_csum(skb, dev,
+				   ~csum_ipv6_magic(src, dst, skb->len,
+						    IPPROTO_TCP, 0), true))
+		return;
+
 	tcp->check = csum_ipv6_magic(src, dst, skb->len, IPPROTO_TCP,
 				     skb_checksum(skb, 0, skb->len, 0));
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -132,7 +195,7 @@ static void tcpwg_tunnel_xmit4(struct rtable *rt, struct sock *sock,
 	tcpwg_fill_header(tcp, sport, dport, flags, seq, ack_seq);
 
 	memset(&IPCB(skb)->opt, 0, sizeof(IPCB(skb)->opt));
-	tcpwg_set_v4_csum(skb, src, dst);
+	tcpwg_set_v4_csum(skb, rt->dst.dev, src, dst);
 	tcpwg_setup_skb_sock(sock, skb);
 
 	iptunnel_xmit(
@@ -447,7 +510,7 @@ static void tcpwg_tunnel_xmit6(struct dst_entry *dst, struct sock *sock,
 	tcpwg_fill_header(tcp, sport, dport, flags, seq, ack_seq);
 
 	skb_dst_set(skb, dst);
-	tcpwg_set_v6_csum(skb, src, dst_addr);
+	tcpwg_set_v6_csum(skb, src, dst_addr, dst->dev);
 
 	__skb_push(skb, sizeof(*ip6h));
 	skb_reset_network_header(skb);
