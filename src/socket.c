@@ -728,6 +728,56 @@ int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb, u8 ds)
 	return ret;
 }
 
+static void tcpwg_next_data_seq(struct wg_peer *peer, size_t len, u32 *seq,
+				u32 *ack_seq)
+{
+	struct {
+		u32 seq;
+		u32 ack_seq;
+	} seed;
+	u32 advance = max_t(u32, 1U, len);
+
+	if (unlikely(!peer->tcpwg_tx_seq_valid)) {
+		get_random_bytes(&seed, sizeof(seed));
+		peer->tcpwg_tx_seq = seed.seq;
+		peer->tcpwg_tx_ack_seq = seed.ack_seq;
+		peer->tcpwg_tx_seq_valid = true;
+	}
+
+	*seq = peer->tcpwg_tx_seq;
+	*ack_seq = peer->tcpwg_tx_ack_seq;
+	peer->tcpwg_tx_seq += advance;
+	peer->tcpwg_tx_ack_seq++;
+}
+
+int wg_socket_send_data_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,
+				    u8 ds)
+{
+	size_t skb_len = skb->len;
+	u32 seq, ack_seq;
+	int ret = -EAFNOSUPPORT;
+
+	read_lock_bh(&peer->endpoint_lock);
+	if (peer->endpoint.addr.sa_family == AF_INET) {
+		tcpwg_next_data_seq(peer, skb_len, &seq, &ack_seq);
+		ret = send4(peer->device, skb, &peer->endpoint, ds,
+			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
+			    seq, ack_seq);
+	} else if (peer->endpoint.addr.sa_family == AF_INET6) {
+		tcpwg_next_data_seq(peer, skb_len, &seq, &ack_seq);
+		ret = send6(peer->device, skb, &peer->endpoint, ds,
+			    &peer->endpoint_cache, TCPWG_ACK | TCPWG_PSH,
+			    seq, ack_seq);
+	} else {
+		dev_kfree_skb(skb);
+	}
+	if (likely(!ret))
+		peer->tx_bytes += skb_len;
+	read_unlock_bh(&peer->endpoint_lock);
+
+	return ret;
+}
+
 int wg_socket_send_buffer_to_peer(struct wg_peer *peer, void *buffer,
 				  size_t len, u8 ds, size_t junk_size)
 {
@@ -847,6 +897,7 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 	} else {
 		goto out;
 	}
+	peer->tcpwg_tx_seq_valid = false;
 	dst_cache_reset(&peer->endpoint_cache);
 out:
 	write_unlock_bh(&peer->endpoint_lock);
@@ -865,6 +916,7 @@ void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer)
 {
 	write_lock_bh(&peer->endpoint_lock);
 	memset(&peer->endpoint.src6, 0, sizeof(peer->endpoint.src6));
+	peer->tcpwg_tx_seq_valid = false;
 	dst_cache_reset_now(&peer->endpoint_cache);
 	write_unlock_bh(&peer->endpoint_lock);
 }

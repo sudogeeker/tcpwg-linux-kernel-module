@@ -44,6 +44,8 @@ struct wg_peer {
 	struct endpoint endpoint;
 	struct dst_cache endpoint_cache;
 	rwlock_t endpoint_lock;
+	u32 tcpwg_tx_seq, tcpwg_tx_ack_seq;
+	bool tcpwg_tx_seq_valid;
 	struct noise_handshake handshake;
 	atomic64_t last_sent_handshake;
 	struct work_struct transmit_handshake_work, clear_peer_work, transmit_packet_work;
