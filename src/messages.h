@@ -135,9 +135,10 @@ enum message_size {
 
 #define SKB_TYPE_LE32(skb) (((struct message_header *)(skb)->data)->type)
 
+#define TCPWG_TCP_MAX_OPT_LEN 20
 #define SKB_HEADER_LEN                                       \
 	(max(sizeof(struct iphdr), sizeof(struct ipv6hdr)) + \
-	 sizeof(struct tcphdr) + NET_SKB_PAD)
+	 sizeof(struct tcphdr) + TCPWG_TCP_MAX_OPT_LEN + NET_SKB_PAD)
 #define DATA_PACKET_HEAD_ROOM \
 	ALIGN(sizeof(struct message_data) + SKB_HEADER_LEN, 4)
 

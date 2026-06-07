@@ -52,6 +52,18 @@ struct tcpwg_fake_tcp {
 	u32 peer_isn;
 	u32 tx_seq;
 	u32 rx_seq;
+	u32 ts_recent;
+	u8 rx_packets_since_ack;
+	bool ts_enabled;
+	bool ack_pending;
+
+	u8 control_retries;
+	u8 control_flags;
+	u32 control_seq;
+	u32 control_ack_seq;
+	u32 control_ts_ecr;
+	bool control_ts_enabled;
+	unsigned long control_retry_at;
 
 	unsigned long state_since;
 	unsigned long last_seen;
@@ -61,6 +73,7 @@ struct tcpwg_fake_tcp {
 	bool tuple_valid;
 
 	struct delayed_work maintenance_work;
+	struct delayed_work ack_work;
 };
 
 struct wg_peer {
