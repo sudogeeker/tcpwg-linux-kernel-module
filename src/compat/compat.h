@@ -113,6 +113,11 @@ static inline bool ipv6_mod_enabled(void)
 }
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 1, 0)
+#define ip6_dst_lookup_flow(net, sock, fl6, final_dst) \
+	ipv6_stub->ipv6_dst_lookup_flow(net, sock, fl6, final_dst)
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0) && !defined(ISRHEL7)
 #include <linux/skbuff.h>
 static inline void skb_reset_tc(struct sk_buff *skb)
@@ -548,6 +553,11 @@ static inline void *__compat_kvcalloc(size_t n, size_t size, gfp_t flags)
 #include <net/genetlink.h>
 #define nlmsg_parse(a, b, c, d, e, f) nlmsg_parse(a, b, c, d, e)
 #define nla_parse_nested(a, b, c, d, e) nla_parse_nested(a, b, c, d)
+#endif
+
+#ifndef NLA_POLICY_NESTED_ARRAY
+#define COMPAT_CANNOT_VALIDATE_NESTED_ARRAY_IN_POLICY
+#define NLA_POLICY_NESTED_ARRAY(policy) { .type = NLA_NESTED }
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 10, 0) && !defined(ISRHEL7)
@@ -1085,6 +1095,9 @@ static inline void skb_reset_redirect(struct sk_buff *skb)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0)
 #define pre_exit exit
+#define COMPAT_CANNOT_USE_PERNET_EXIT_RTNL
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+#define COMPAT_CANNOT_USE_PERNET_EXIT_RTNL
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
@@ -1248,7 +1261,7 @@ static inline u32 get_random_u32_inclusive(u32 floor, u32 ceil)
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-#define COMPAT_GENL_HAS_RESV_START_OP
+#define COMPAT_CAN_USE_GENL_SPLIT_OPS
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 2) && \
@@ -1362,6 +1375,10 @@ static inline bool skb_queue_empty_lockless(const struct sk_buff_head *list)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 #define NLA_POLICY_MASK(tp, _mask) { .type = tp }
+#endif
+
+#ifndef WQ_PERCPU
+#define WQ_PERCPU 0
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 14, 0)

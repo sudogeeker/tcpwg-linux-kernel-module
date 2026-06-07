@@ -230,16 +230,6 @@ static bool encrypt_packet(u32 message_type, size_t junk_size, struct sk_buff *s
 	trailer_len = padding_len + noise_encrypted_len(0);
 	plaintext_len = skb->len + padding_len;
 
-	/* Expand data section to have room for padding and auth tag. */
-	num_frags = skb_cow_data(skb, trailer_len, &trailer);
-	if (unlikely(num_frags < 0 || num_frags > ARRAY_SIZE(sg)))
-		return false;
-
-	/* Set the padding to zeros, and make sure it and the auth tag are part
-	 * of the skb.
-	 */
-	memset(skb_tail_pointer(trailer), 0, padding_len);
-
 	/* Expand head section to have room for our header and the network
 	 * stack's headers.
 	 */
@@ -250,6 +240,16 @@ static bool encrypt_packet(u32 message_type, size_t junk_size, struct sk_buff *s
 	if (unlikely(skb->ip_summed == CHECKSUM_PARTIAL &&
 		     skb_checksum_help(skb)))
 		return false;
+
+	/* Expand data section to have room for padding and auth tag. */
+	num_frags = skb_cow_data(skb, trailer_len, &trailer);
+	if (unlikely(num_frags < 0 || num_frags > ARRAY_SIZE(sg)))
+		return false;
+
+	/* Set the padding to zeros, and make sure it and the auth tag are part
+	 * of the skb.
+	 */
+	memset(skb_tail_pointer(trailer), 0, padding_len);
 
 	/* Only after checksumming can we safely add on the padding at the end
 	 * and the header.

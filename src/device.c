@@ -370,7 +370,8 @@ static int wg_newlink(struct net_device *dev,
 #endif
 
 	wg->handshake_receive_wq = alloc_workqueue("wg-kex-%s",
-			WQ_CPU_INTENSIVE | WQ_FREEZABLE, 0, dev->name);
+			WQ_CPU_INTENSIVE | WQ_FREEZABLE | WQ_PERCPU, 0,
+			dev->name);
 	if (!wg->handshake_receive_wq)
 		goto err_free_tstats;
 
@@ -380,7 +381,8 @@ static int wg_newlink(struct net_device *dev,
 		goto err_destroy_handshake_receive;
 
 	wg->packet_crypt_wq = alloc_workqueue("wg-crypt-%s",
-			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM, 0, dev->name);
+			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU, 0,
+			dev->name);
 	if (!wg->packet_crypt_wq)
 		goto err_destroy_handshake_send;
 
@@ -470,12 +472,11 @@ static struct rtnl_link_ops link_ops __read_mostly = {
 #endif
 };
 
-static void wg_netns_pre_exit(struct net *net)
+static void wg_netns_cleanup(struct net *net)
 {
 	struct wg_device *wg;
 	struct wg_peer *peer;
 
-	rtnl_lock();
 	list_for_each_entry(wg, &device_list, device_list) {
 		if (rcu_access_pointer(wg->creating_net) == net) {
 			pr_debug("%s: Creating namespace exiting\n", wg->dev->name);
@@ -488,11 +489,29 @@ static void wg_netns_pre_exit(struct net *net)
 			mutex_unlock(&wg->device_update_lock);
 		}
 	}
-	rtnl_unlock();
 }
 
-static struct pernet_operations pernet_ops = {
+#ifdef COMPAT_CANNOT_USE_PERNET_EXIT_RTNL
+static void wg_netns_pre_exit(struct net *net)
+{
+	rtnl_lock();
+	wg_netns_cleanup(net);
+	rtnl_unlock();
+}
+#else
+static void __net_exit wg_netns_exit_rtnl(struct net *net,
+					  struct list_head *dev_kill_list)
+{
+	wg_netns_cleanup(net);
+}
+#endif
+
+static struct pernet_operations pernet_ops __read_mostly = {
+#ifdef COMPAT_CANNOT_USE_PERNET_EXIT_RTNL
 	.pre_exit = wg_netns_pre_exit
+#else
+	.exit_rtnl = wg_netns_exit_rtnl
+#endif
 };
 
 int __init wg_device_init(void)

@@ -22,17 +22,25 @@
 #include <linux/in.h>
 #include <linux/in6.h>
 
+#ifdef COMPAT_CANNOT_VALIDATE_NESTED_ARRAY_IN_POLICY
+#define COMPAT_NESTED_POLICY(policy) policy
+#else
+#define COMPAT_NESTED_POLICY(policy) NULL
+#endif
+
 static struct genl_family genl_family;
+static const struct nla_policy allowedip_policy[WGALLOWEDIP_A_MAX + 1];
+static const struct nla_policy peer_policy[WGPEER_A_MAX + 1];
 
 static const struct nla_policy device_policy[WGDEVICE_A_MAX + 1] = {
 	[WGDEVICE_A_IFINDEX]		= { .type = NLA_U32 },
 	[WGDEVICE_A_IFNAME]		= { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
-	[WGDEVICE_A_PRIVATE_KEY]	= NLA_POLICY_EXACT_LEN(NOISE_PUBLIC_KEY_LEN),
-	[WGDEVICE_A_PUBLIC_KEY]		= NLA_POLICY_EXACT_LEN(NOISE_PUBLIC_KEY_LEN),
+	[WGDEVICE_A_PRIVATE_KEY]	= NLA_POLICY_EXACT_LEN(WG_KEY_LEN),
+	[WGDEVICE_A_PUBLIC_KEY]		= NLA_POLICY_EXACT_LEN(WG_KEY_LEN),
 	[WGDEVICE_A_FLAGS]		= NLA_POLICY_MASK(NLA_U32, __WGDEVICE_F_ALL),
 	[WGDEVICE_A_LISTEN_PORT]	= { .type = NLA_U16 },
 	[WGDEVICE_A_FWMARK]		= { .type = NLA_U32 },
-	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED },
+	[WGDEVICE_A_PEERS]		= NLA_POLICY_NESTED_ARRAY(peer_policy),
 	[WGDEVICE_A_JC]		= { .type = NLA_U16 },
 	[WGDEVICE_A_JMIN]		= { .type = NLA_U16 },
 	[WGDEVICE_A_JMAX]		= { .type = NLA_U16 },
@@ -53,15 +61,15 @@ static const struct nla_policy device_policy[WGDEVICE_A_MAX + 1] = {
 };
 
 static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
-	[WGPEER_A_PUBLIC_KEY]				= NLA_POLICY_EXACT_LEN(NOISE_PUBLIC_KEY_LEN),
-	[WGPEER_A_PRESHARED_KEY]			= NLA_POLICY_EXACT_LEN(NOISE_SYMMETRIC_KEY_LEN),
+	[WGPEER_A_PUBLIC_KEY]				= NLA_POLICY_EXACT_LEN(WG_KEY_LEN),
+	[WGPEER_A_PRESHARED_KEY]			= NLA_POLICY_EXACT_LEN(WG_KEY_LEN),
 	[WGPEER_A_FLAGS]				= NLA_POLICY_MASK(NLA_U32, __WGPEER_F_ALL),
 	[WGPEER_A_ENDPOINT]				= NLA_POLICY_MIN_LEN(sizeof(struct sockaddr)),
 	[WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL]	= { .type = NLA_U16 },
 	[WGPEER_A_LAST_HANDSHAKE_TIME]			= NLA_POLICY_EXACT_LEN(sizeof(struct __kernel_timespec)),
 	[WGPEER_A_RX_BYTES]				= { .type = NLA_U64 },
 	[WGPEER_A_TX_BYTES]				= { .type = NLA_U64 },
-	[WGPEER_A_ALLOWEDIPS]				= { .type = NLA_NESTED },
+	[WGPEER_A_ALLOWEDIPS]				= NLA_POLICY_NESTED_ARRAY(allowedip_policy),
 	[WGPEER_A_PROTOCOL_VERSION]			= { .type = NLA_U32 },
 	[WGPEER_A_ADVANCED_SECURITY]    		= { .type = NLA_FLAG }
 };
@@ -554,7 +562,8 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 
 		nla_for_each_nested(attr, attrs[WGPEER_A_ALLOWEDIPS], rem) {
 			ret = nla_parse_nested(allowedip, WGALLOWEDIP_A_MAX,
-					       attr, allowedip_policy, NULL);
+					       attr, COMPAT_NESTED_POLICY(allowedip_policy),
+					       NULL);
 			if (ret < 0)
 				goto out;
 			ret = set_allowedip(peer, allowedip);
@@ -809,7 +818,8 @@ skip_set_private_key:
 
 		nla_for_each_nested(attr, info->attrs[WGDEVICE_A_PEERS], rem) {
 			ret = nla_parse_nested(peer, WGPEER_A_MAX, attr,
-					       peer_policy, NULL);
+					       COMPAT_NESTED_POLICY(peer_policy),
+					       NULL);
 			if (ret < 0)
 				goto out;
 			ret = set_peer(wg, peer);
@@ -830,6 +840,27 @@ out_nodev:
 	return ret;
 }
 
+#ifdef COMPAT_CAN_USE_GENL_SPLIT_OPS
+static const struct genl_split_ops genl_ops[] = {
+	{
+		.cmd = WG_CMD_GET_DEVICE,
+#ifndef COMPAT_CANNOT_USE_NETLINK_START
+		.start = wg_get_device_start,
+#endif
+		.dumpit = wg_get_device_dump,
+		.done = wg_get_device_done,
+		.policy = device_policy,
+		.maxattr = WGDEVICE_A_IFNAME,
+		.flags = GENL_UNS_ADMIN_PERM | GENL_CMD_CAP_DUMP,
+	}, {
+		.cmd = WG_CMD_SET_DEVICE,
+		.doit = wg_set_device,
+		.policy = device_policy,
+		.maxattr = WGDEVICE_A_MAX,
+		.flags = GENL_UNS_ADMIN_PERM | GENL_CMD_CAP_DO,
+	}
+};
+#else
 #ifndef COMPAT_CANNOT_USE_CONST_GENL_OPS
 static const
 #else
@@ -856,6 +887,7 @@ struct genl_ops genl_ops[] = {
 		.flags = GENL_UNS_ADMIN_PERM
 	}
 };
+#endif
 
 static const struct genl_multicast_group wg_genl_mcgrps[] = {
 	{
@@ -866,19 +898,24 @@ static const struct genl_multicast_group wg_genl_mcgrps[] = {
 static struct genl_family genl_family
 #ifndef COMPAT_CANNOT_USE_GENL_NOPS
 __ro_after_init = {
+#ifdef COMPAT_CAN_USE_GENL_SPLIT_OPS
+	.split_ops = genl_ops,
+	.n_split_ops = ARRAY_SIZE(genl_ops),
+#else
 	.ops = genl_ops,
 	.n_ops = ARRAY_SIZE(genl_ops),
+#endif
 #else
 = {
 #endif
-#ifdef COMPAT_GENL_HAS_RESV_START_OP
-	.resv_start_op = WG_CMD_SET_DEVICE + 1,
-#endif
 	.name = WG_GENL_NAME,
 	.version = WG_GENL_VERSION,
+#ifndef COMPAT_CAN_USE_GENL_SPLIT_OPS
 	.maxattr = WGDEVICE_A_MAX,
+#endif
 	.module = THIS_MODULE,
-#ifndef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
+#if !defined(COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY) && \
+	!defined(COMPAT_CAN_USE_GENL_SPLIT_OPS)
 	.policy = device_policy,
 #endif
 	.netnsok = true,
@@ -890,6 +927,9 @@ __ro_after_init = {
 
 int __init wg_genetlink_init(void)
 {
+	BUILD_BUG_ON(WG_KEY_LEN != NOISE_PUBLIC_KEY_LEN);
+	BUILD_BUG_ON(WG_KEY_LEN != NOISE_SYMMETRIC_KEY_LEN);
+
 	return genl_register_family(&genl_family);
 }
 
