@@ -124,11 +124,14 @@ was not installed for the running kernel.
 
 ### Upgrade or reinstall
 
-Pull the latest source and run the same build/install flow again:
+Force-sync the working tree to the latest remote source and run the same
+build/install flow again. This discards local uncommitted changes and local
+commits that are not on `origin/master`:
 
 ```shell
 cd tcpwg-linux-kernel-module
-git pull --ff-only
+git fetch origin
+git reset --hard origin/master
 cd src
 make clean
 make -j"$(nproc)"
