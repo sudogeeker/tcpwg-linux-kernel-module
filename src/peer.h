@@ -54,8 +54,11 @@ struct tcpwg_fake_tcp {
 	u32 rx_seq;
 	u32 ts_recent;
 	u8 rx_packets_since_ack;
+	u8 rx_ack_target;
 	bool ts_enabled;
 	bool ack_pending;
+	u64 rx_ack_bytes;
+	unsigned long rx_ack_window_start;
 
 	u8 control_retries;
 	u8 control_flags;

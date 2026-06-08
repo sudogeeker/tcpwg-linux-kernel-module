@@ -20,6 +20,7 @@ This README documents one supported installation flow:
   - [Targets](#targets)
   - [Variables](#variables)
 - [Configuration](#configuration)
+- [TCP fingerprint behavior](#tcp-fingerprint-behavior)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -293,6 +294,39 @@ when needed, for example `make KERNELRELEASE=6.12.0-custom`.
 
 The MTU-derived values above assume a basic internet connection with an MTU of
 1280.
+
+## TCP fingerprint behavior
+
+The module wraps WireGuard packets in a fake TCP outer flow. This is a TCP
+fingerprint shim, not a full TCP implementation. It does not retransmit fake TCP
+data and does not run a TCP congestion-control state machine.
+
+The current high-BDP fingerprint is tuned around these properties:
+
+- The SYN advertises a 64,240 byte window with window scale 14. This keeps the
+  apparent TCP receive window large enough for long-RTT, high-bandwidth paths.
+- Outer data packets use `PSH|ACK`.
+- The fake TCP data receiver accepts payload across sequence gaps and advances
+  `rx_seq` only when the received payload end sequence is newer. Sequence gaps
+  are logged at a ratelimited debug level instead of causing immediate payload
+  drops.
+- Delayed ACK aggregation is adaptive. It defaults to ACK every 16 payload
+  packets, then samples received fake TCP payload over one-second windows and
+  uses ACK2, ACK4, ACK8, or ACK16 according to receive rate. High-rate traffic
+  stays at ACK16.
+- The outer DSCP fingerprint remains EF / DSCP 46.
+
+For high-throughput deployments, apply runtime network tuning after the tunnel
+interfaces have been recreated by the controller:
+
+```shell
+sudo ip link set dev <tcp-wg-interface> mtu 1388
+sudo tc qdisc replace dev <underlay-interface> root fq
+```
+
+Apply the `fq` qdisc after the control agent has recreated the tunnel
+interfaces and handshakes are stable. Replacing the root qdisc during interface
+replay can temporarily interrupt the fake TCP handshake path on some hosts.
 
 ## Troubleshooting
 

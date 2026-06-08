@@ -33,7 +33,7 @@ enum cookie_values {
 };
 
 enum counter_values {
-	COUNTER_BITS_TOTAL = 8192,
+	COUNTER_BITS_TOTAL = 32768,
 	COUNTER_REDUNDANT_BITS = BITS_PER_LONG,
 	COUNTER_WINDOW_SIZE = COUNTER_BITS_TOTAL - COUNTER_REDUNDANT_BITS
 };
@@ -51,7 +51,7 @@ enum limits {
 	MAX_TIMER_HANDSHAKES = 90 / REKEY_TIMEOUT,
 	MAX_QUEUED_INCOMING_HANDSHAKES = 4096, /* TODO: replace this with DQL */
 	MAX_STAGED_PACKETS = 128,
-	MAX_QUEUED_PACKETS = 1024 /* TODO: replace this with DQL */
+	MAX_QUEUED_PACKETS = 4096 /* TODO: replace this with DQL */
 };
 
 enum message_type {
