@@ -414,7 +414,7 @@ static int set_port(struct wg_device *wg, u16 port)
 	if (wg->incoming_port == port)
 		return 0;
 	list_for_each_entry(peer, &wg->peer_list, peer_list)
-		wg_socket_clear_peer_endpoint_src(peer);
+		wg_socket_clear_peer_endpoint_src_trusted(peer);
 	if (!netif_running(wg->dev)) {
 		wg->incoming_port = port;
 		return 0;
@@ -545,10 +545,12 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 
 		if (len == sizeof(struct sockaddr_in) && addr->sa_family == AF_INET) {
 			endpoint.addr4 = *(struct sockaddr_in *)addr;
-			wg_socket_set_peer_endpoint(peer, &endpoint);
+			wg_socket_set_peer_endpoint_from_trusted_config(peer,
+								       &endpoint);
 		} else if (len == sizeof(struct sockaddr_in6) && addr->sa_family == AF_INET6) {
 			endpoint.addr6 = *(struct sockaddr_in6 *)addr;
-			wg_socket_set_peer_endpoint(peer, &endpoint);
+			wg_socket_set_peer_endpoint_from_trusted_config(peer,
+								       &endpoint);
 		}
 	}
 
@@ -644,7 +646,7 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 
 		wg->fwmark = nla_get_u32(info->attrs[WGDEVICE_A_FWMARK]);
 		list_for_each_entry(peer, &wg->peer_list, peer_list)
-			wg_socket_clear_peer_endpoint_src(peer);
+			wg_socket_clear_peer_endpoint_src_trusted(peer);
 	}
 
 	if (info->attrs[WGDEVICE_A_LISTEN_PORT]) {

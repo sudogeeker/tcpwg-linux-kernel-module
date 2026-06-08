@@ -24,21 +24,19 @@ int wg_socket_send_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,
 			       u8 ds);
 int wg_socket_send_data_skb_to_peer(struct wg_peer *peer, struct sk_buff *skb,
 				    u8 ds);
-int wg_socket_send_buffer_as_reply_to_skb(struct wg_device *wg,
-					  struct sk_buff *in_skb,
-					  void *out_buffer, size_t len, size_t junk_size);
+int wg_socket_send_buffer_as_untrusted_reply_to_skb(struct wg_device *wg,
+						    struct sk_buff *in_skb,
+						    void *out_buffer,
+						    size_t len,
+						    size_t junk_size);
 
 int wg_socket_endpoint_from_skb(struct endpoint *endpoint,
 				const struct sk_buff *skb);
-void wg_socket_set_peer_endpoint(struct wg_peer *peer,
-				 const struct endpoint *endpoint);
-void wg_socket_set_peer_endpoint_from_rx(struct wg_peer *peer,
-					 const struct endpoint *endpoint);
-void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
-					  const struct sk_buff *skb);
+void wg_socket_set_peer_endpoint_from_trusted_config(struct wg_peer *peer,
+						     const struct endpoint *endpoint);
 void wg_socket_set_peer_endpoint_from_authenticated_skb(struct wg_peer *peer,
 							const struct sk_buff *skb);
-void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer);
+void wg_socket_clear_peer_endpoint_src_trusted(struct wg_peer *peer);
 
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 #define net_dbg_skb_ratelimited(fmt, dev, skb, ...) do {                       \

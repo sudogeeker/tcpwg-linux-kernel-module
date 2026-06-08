@@ -39,9 +39,7 @@ struct endpoint {
 enum tcpwg_fake_state {
 	TCPWG_FAKE_CLOSED = 0,
 	TCPWG_FAKE_SYN_SENT,
-	TCPWG_FAKE_SYN_RECEIVED,
 	TCPWG_FAKE_ESTABLISHED,
-	TCPWG_FAKE_CLOSE_WAIT,
 };
 
 struct tcpwg_fake_tcp {

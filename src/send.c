@@ -168,9 +168,9 @@ void wg_packet_send_handshake_cookie(struct wg_device *wg,
 	wg_cookie_message_create(&packet, initiating_skb, sender_index,
 				 &wg->cookie_checker,
 				 mh_genheader(&wg->headers[MSGIDX_HANDSHAKE_COOKIE]));
-	wg_socket_send_buffer_as_reply_to_skb(wg, initiating_skb, &packet,
-					      sizeof(packet),
-						  wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
+	wg_socket_send_buffer_as_untrusted_reply_to_skb(wg, initiating_skb,
+						       &packet, sizeof(packet),
+						       wg->junk_size[MSGIDX_HANDSHAKE_COOKIE]);
 }
 
 static void keep_key_fresh(struct wg_peer *peer)

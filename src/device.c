@@ -486,7 +486,7 @@ static void wg_netns_cleanup(struct net *net)
 			rcu_assign_pointer(wg->creating_net, NULL);
 			wg_socket_reinit(wg, NULL, NULL);
 			list_for_each_entry(peer, &wg->peer_list, peer_list)
-				wg_socket_clear_peer_endpoint_src(peer);
+				wg_socket_clear_peer_endpoint_src_trusted(peer);
 			mutex_unlock(&wg->device_update_lock);
 		}
 	}
