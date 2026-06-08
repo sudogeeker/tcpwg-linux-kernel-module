@@ -1701,7 +1701,7 @@ void wg_socket_set_peer_endpoint_from_authenticated_skb(struct wg_peer *peer,
 
 	tcp = tcp_hdr(skb);
 	payload_len = tcpwg_skb_payload_len(skb);
-	if (WARN_ON_ONCE(!payload_len || tcp->syn || !tcp->ack))
+	if (!payload_len || tcp->syn || !tcp->ack)
 		return;
 
 	write_lock_bh(&peer->endpoint_lock);
