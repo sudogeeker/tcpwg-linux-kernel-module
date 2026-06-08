@@ -45,7 +45,7 @@ enum {
 #define TCPWG_FAKE_KEEPALIVE_INTERVAL (20 * HZ)
 #define TCPWG_FAKE_IDLE_TIMEOUT (120 * HZ)
 #define TCPWG_FAKE_EPOCH_TIMEOUT (REJECT_AFTER_TIME * HZ)
-#define TCPWG_FAKE_DSCP_TOS 0xb8 /* EF / DSCP 46, ECN preserved by callers. */
+#define TCPWG_FAKE_DSCP_TOS 0xa0 /* CS5 / DSCP 40, ECN preserved by callers. */
 #define TCPWG_FAKE_WINDOW 64240
 #define TCPWG_FAKE_WSCALE 14
 #define TCPWG_TCP_TS_OPT_LEN 12
