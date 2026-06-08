@@ -36,6 +36,8 @@ void wg_socket_set_peer_endpoint_from_rx(struct wg_peer *peer,
 					 const struct endpoint *endpoint);
 void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
 					  const struct sk_buff *skb);
+void wg_socket_set_peer_endpoint_from_authenticated_skb(struct wg_peer *peer,
+							const struct sk_buff *skb);
 void wg_socket_clear_peer_endpoint_src(struct wg_peer *peer);
 
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
